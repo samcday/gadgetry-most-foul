@@ -11,7 +11,7 @@ use std::{
     time::Duration,
 };
 
-use usb_gadget::{
+use gadgetry_most_foul::{
     default_udc,
     function::printer::{Printer, StatusFlags, GADGET_GET_PRINTER_STATUS, GADGET_SET_PRINTER_STATUS},
     Class, Config, Gadget, Id, RegGadget, Strings, GADGET_IOC_MAGIC,
@@ -48,7 +48,7 @@ fn ioctl_write_printer_status(file: &File, status: u8) -> Result<()> {
 }
 
 fn create_printer_gadget() -> Result<RegGadget> {
-    usb_gadget::remove_all().expect("cannot remove all gadgets");
+    gadgetry_most_foul::remove_all().expect("cannot remove all gadgets");
 
     let udc = default_udc().expect("cannot get UDC");
     let mut builder = Printer::builder();

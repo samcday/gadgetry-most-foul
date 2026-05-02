@@ -1,7 +1,7 @@
 # USB printer gadget.
 #
 # Usage:
-#   usb-gadget up printer.toml
+#   gadgetry-most-foul up printer.toml
 
 name = "printer"
 # udc = "dummy_udc.0"

@@ -27,7 +27,7 @@ use std::{
     time::Duration,
 };
 
-use usb_gadget::{
+use gadgetry_most_foul::{
     default_udc,
     function::custom::{Custom, Endpoint, EndpointDirection, Event, Interface},
     Class, Config, Gadget, Id, Strings,
@@ -49,10 +49,10 @@ mod req {
 fn setup_gadget_with_id(
     vid: u16, pid: u16, product: &str, serial: &str,
 ) -> (
-    usb_gadget::RegGadget,
+    gadgetry_most_foul::RegGadget,
     Custom,
-    usb_gadget::function::custom::EndpointReceiver,
-    usb_gadget::function::custom::EndpointSender,
+    gadgetry_most_foul::function::custom::EndpointReceiver,
+    gadgetry_most_foul::function::custom::EndpointSender,
 ) {
     let (ep_rx, ep_rx_dir) = EndpointDirection::host_to_device();
     let (ep_tx, ep_tx_dir) = EndpointDirection::device_to_host();

@@ -7,7 +7,7 @@ use serial_test::serial;
 fn query_udcs() {
     init();
 
-    let udcs = usb_gadget::udcs().unwrap();
+    let udcs = gadgetry_most_foul::udcs().unwrap();
     println!("USB device controllers:\n{:#?}", &udcs);
 
     for udc in udcs {

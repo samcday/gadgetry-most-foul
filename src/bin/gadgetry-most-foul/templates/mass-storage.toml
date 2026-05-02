@@ -1,7 +1,7 @@
 # USB mass storage gadget.
 #
 # Usage:
-#   usb-gadget up mass-storage.toml
+#   gadgetry-most-foul up mass-storage.toml
 
 name = "mass-storage"
 # udc = "dummy_udc.0"

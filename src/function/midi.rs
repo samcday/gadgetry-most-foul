@@ -6,7 +6,7 @@
 //! # Example
 //!
 //! ```no_run
-//! use usb_gadget::{default_udc, function::midi::Midi, Class, Config, Gadget, Id, Strings};
+//! use gadgetry_most_foul::{default_udc, function::midi::Midi, Class, Config, Gadget, Id, Strings};
 //!
 //! let mut builder = Midi::builder();
 //! builder.id = Some("midi".to_string());

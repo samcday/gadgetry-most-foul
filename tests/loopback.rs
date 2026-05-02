@@ -2,7 +2,7 @@ mod common;
 use common::*;
 use serial_test::serial;
 
-use usb_gadget::function::loopback::Loopback;
+use gadgetry_most_foul::function::loopback::Loopback;
 
 #[test]
 #[serial]

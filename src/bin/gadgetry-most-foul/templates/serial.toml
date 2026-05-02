@@ -1,7 +1,7 @@
 # USB serial (ACM) gadget.
 #
 # Usage:
-#   usb-gadget up serial.toml
+#   gadgetry-most-foul up serial.toml
 
 name = "serial-debug"
 # udc = "dummy_udc.0"       # UDC name (auto-detect if omitted)

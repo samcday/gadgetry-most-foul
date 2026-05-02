@@ -1,11 +1,11 @@
-//! Build usb-gadget types from config structs.
+//! Build gadgetry-most-foul types from config structs.
 
 use std::{
     io::{Error, ErrorKind, Result},
     path::PathBuf,
 };
 
-use usb_gadget::{
+use gadgetry_most_foul::{
     function::{self, Handle},
     Class, Config, Gadget, Id, Language, OsDescriptor, Speed, Strings, UsbVersion,
 };
@@ -56,13 +56,13 @@ pub fn build_gadget(cfg: &GadgetConfig) -> Result<(Gadget, Option<String>)> {
 
     if let Some(ref web) = cfg.web_usb {
         let version = match web.version.as_deref() {
-            Some("1.0") | None => usb_gadget::WebUsbVersion::V10,
+            Some("1.0") | None => gadgetry_most_foul::WebUsbVersion::V10,
             Some(other) => {
                 let v = parse_hex_u16(other)?;
-                usb_gadget::WebUsbVersion::Other(v)
+                gadgetry_most_foul::WebUsbVersion::Other(v)
             }
         };
-        gadget.web_usb = Some(usb_gadget::WebUsb {
+        gadget.web_usb = Some(gadgetry_most_foul::WebUsb {
             version,
             vendor_code: web.vendor_code,
             landing_page: web.landing_page.clone(),

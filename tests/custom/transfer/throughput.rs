@@ -18,7 +18,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use usb_gadget::{
+use gadgetry_most_foul::{
     default_udc,
     function::custom::{Custom, Endpoint, EndpointDirection, Interface},
     Class, Config, Gadget, Id, Speed, Strings,
@@ -80,10 +80,10 @@ fn min_throughput_mib_s(driver: &str, max_speed: Speed) -> Option<f64> {
 /// Returns the registration handle, custom function, endpoint handles,
 /// the UDC driver name, and the maximum speed.
 fn setup_bench_gadget() -> (
-    usb_gadget::RegGadget,
+    gadgetry_most_foul::RegGadget,
     Custom,
-    usb_gadget::function::custom::EndpointReceiver,
-    usb_gadget::function::custom::EndpointSender,
+    gadgetry_most_foul::function::custom::EndpointReceiver,
+    gadgetry_most_foul::function::custom::EndpointSender,
     String,
     Speed,
 ) {
@@ -122,8 +122,8 @@ fn setup_bench_gadget() -> (
 /// Device side for the throughput benchmark: pipelined send/recv with
 /// pre-allocated buffers for minimal allocation overhead.
 fn run_device_bench(
-    mut custom: Custom, mut ep_rx: usb_gadget::function::custom::EndpointReceiver,
-    mut ep_tx: usb_gadget::function::custom::EndpointSender, stop: Arc<AtomicBool>,
+    mut custom: Custom, mut ep_rx: gadgetry_most_foul::function::custom::EndpointReceiver,
+    mut ep_tx: gadgetry_most_foul::function::custom::EndpointSender, stop: Arc<AtomicBool>,
 ) {
     let stop_rx = stop.clone();
     let stop_tx = stop.clone();

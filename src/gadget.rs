@@ -380,7 +380,7 @@ impl From<UsbVersion> for u16 {
 pub struct Gadget {
     /// Custom name for the gadget in configfs.
     ///
-    /// If `None`, an auto-generated name like `usb-gadget0` is used.
+    /// If `None`, an auto-generated name like `gadgetry-most-foul0` is used.
     pub name: Option<String>,
     /// USB device class.
     pub device_class: Class,
@@ -469,7 +469,7 @@ impl Gadget {
         } else {
             let mut gadget_idx: u16 = 0;
             loop {
-                let dir = usb_gadget_dir.join(format!("usb-gadget{gadget_idx}"));
+                let dir = usb_gadget_dir.join(format!("gadgetry-most-foul{gadget_idx}"));
                 match fs::create_dir(&dir) {
                     Ok(()) => break dir,
                     Err(err) if err.kind() == ErrorKind::AlreadyExists => (),

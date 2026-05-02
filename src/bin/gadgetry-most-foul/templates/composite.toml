@@ -2,7 +2,7 @@
 # Combines serial console + network + mass storage in one gadget.
 #
 # Usage:
-#   usb-gadget up composite.toml
+#   gadgetry-most-foul up composite.toml
 
 name = "composite"
 # udc = "dummy_udc.0"

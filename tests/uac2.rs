@@ -2,7 +2,7 @@ mod common;
 use common::*;
 use serial_test::serial;
 
-use usb_gadget::function::audio::{Channel, Uac2};
+use gadgetry_most_foul::function::audio::{Channel, Uac2};
 
 const CAPTURE_CHANNEL_MASK: u32 = 0b1111_1111;
 const CAPTURE_SAMPLE_RATE: u32 = 48000;

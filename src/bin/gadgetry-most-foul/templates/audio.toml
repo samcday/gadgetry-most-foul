@@ -1,7 +1,7 @@
 # USB Audio Class 2 (UAC2) gadget.
 #
 # Usage:
-#   usb-gadget up audio.toml
+#   gadgetry-most-foul up audio.toml
 
 name = "audio"
 # udc = "dummy_udc.0"

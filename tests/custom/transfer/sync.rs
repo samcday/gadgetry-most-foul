@@ -20,8 +20,8 @@ const PID: u16 = 0x0021;
 
 /// Device side: blocking IO with recv_and_fetch / send_and_flush (no timeout).
 fn run_device_sync(
-    mut custom: Custom, mut ep_rx: usb_gadget::function::custom::EndpointReceiver,
-    mut ep_tx: usb_gadget::function::custom::EndpointSender,
+    mut custom: Custom, mut ep_rx: gadgetry_most_foul::function::custom::EndpointReceiver,
+    mut ep_tx: gadgetry_most_foul::function::custom::EndpointSender,
 ) {
     let stop = Arc::new(AtomicBool::new(false));
     let stop_rx = stop.clone();

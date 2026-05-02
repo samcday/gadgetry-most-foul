@@ -16,7 +16,7 @@ use std::{
     time::Duration,
 };
 
-use usb_gadget::function::custom::{Custom, Event};
+use gadgetry_most_foul::function::custom::{Custom, Event};
 
 use super::*;
 

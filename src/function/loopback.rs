@@ -7,7 +7,7 @@
 //! # Example
 //!
 //! ```no_run
-//! use usb_gadget::{
+//! use gadgetry_most_foul::{
 //!     default_udc, function::loopback::Loopback, Class, Config, Gadget, Id, Strings,
 //! };
 //!

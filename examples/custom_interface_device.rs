@@ -11,7 +11,7 @@ use std::{
     time::Duration,
 };
 
-use usb_gadget::{
+use gadgetry_most_foul::{
     default_udc,
     function::custom::{Custom, Endpoint, EndpointDirection, Event, Interface},
     Class, Config, Gadget, Id, OsDescriptor, Strings, WebUsb,
@@ -20,7 +20,7 @@ use usb_gadget::{
 fn main() {
     env_logger::init();
 
-    usb_gadget::remove_all().expect("cannot remove all gadgets");
+    gadgetry_most_foul::remove_all().expect("cannot remove all gadgets");
 
     let (mut ep1_rx, ep1_dir) = EndpointDirection::host_to_device();
     let (mut ep2_tx, ep2_dir) = EndpointDirection::device_to_host();

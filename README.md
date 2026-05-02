@@ -1,9 +1,9 @@
-usb-gadget
+gadgetry-most-foul
 ==========
 
-[![crates.io page](https://img.shields.io/crates/v/usb-gadget)](https://crates.io/crates/usb-gadget)
-[![docs.rs page](https://docs.rs/usb-gadget/badge.svg)](https://docs.rs/usb-gadget)
-[![Apache 2.0 license](https://img.shields.io/crates/l/usb-gadget)](https://github.com/surban/usb-gadget/blob/master/LICENSE)
+[![crates.io page](https://img.shields.io/crates/v/gadgetry-most-foul)](https://crates.io/crates/gadgetry-most-foul)
+[![docs.rs page](https://docs.rs/gadgetry-most-foul/badge.svg)](https://docs.rs/gadgetry-most-foul)
+[![Apache 2.0 license](https://img.shields.io/crates/l/gadgetry-most-foul)](https://github.com/samcday/gadgetry-most-foul/blob/master/LICENSE)
 
 This library allows implementation of USB peripherals, so called **USB gadgets**,
 on Linux devices that have a USB device controller (UDC).
@@ -35,22 +35,22 @@ Support for OS-specific descriptors and WebUSB is also provided.
 CLI tool
 --------
 
-The `usb-gadget` CLI tool allows you to configure USB gadgets from TOML configuration
+The `gadgetry-most-foul` CLI tool allows you to configure USB gadgets from TOML configuration
 files without writing any Rust code.
 
 ### Installation
 
-    cargo install usb-gadget --features cli
+    cargo install gadgetry-most-foul --features cli
 
 ### Usage
 
 Create a TOML configuration file describing your gadget, then use the CLI to manage it:
 
-    usb-gadget up gadget.toml       # register and bind a gadget
-    usb-gadget list                 # list registered gadgets
-    usb-gadget down my-gadget       # remove a gadget by name
-    usb-gadget down --all           # remove all gadgets
-    usb-gadget check gadget.toml    # validate a config file
+    gadgetry-most-foul up gadget.toml       # register and bind a gadget
+    gadgetry-most-foul list                 # list registered gadgets
+    gadgetry-most-foul down my-gadget       # remove a gadget by name
+    gadgetry-most-foul down --all           # remove all gadgets
+    gadgetry-most-foul check gadget.toml    # validate a config file
 
 You can also pass a directory to `up` or `check` to process all `.toml` files in it.
 
@@ -75,14 +75,14 @@ class = "acm"
 ```
 
 Multiple functions can be combined in a single gadget by adding more `[[config.function]]`
-entries. Run `usb-gadget template --list` to see all available templates.
+entries. Run `gadgetry-most-foul template --list` to see all available templates.
 
 Features
 --------
 
 This crate provides the following optional features:
 
-* `cli`: builds the `usb-gadget` CLI tool for configuring gadgets from TOML files.
+* `cli`: builds the `gadgetry-most-foul` CLI tool for configuring gadgets from TOML files.
 * `tokio`: enables async support for custom USB functions on top of the Tokio runtime.
 
 Requirements
@@ -121,12 +121,12 @@ the `configfs` filesystem needs to be mounted.
 License
 -------
 
-usb-gadget is licensed under the [Apache 2.0 license].
+gadgetry-most-foul is licensed under the [Apache 2.0 license].
 
-[Apache 2.0 license]: https://github.com/surban/usb-gadget/blob/master/LICENSE
+[Apache 2.0 license]: https://github.com/samcday/gadgetry-most-foul/blob/master/LICENSE
 
 ### Contribution
 
 Unless you explicitly state otherwise, any contribution intentionally submitted
-for inclusion in usb-gadget by you, shall be licensed as Apache 2.0, without any
+for inclusion in gadgetry-most-foul by you, shall be licensed as Apache 2.0, without any
 additional terms or conditions.

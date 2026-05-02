@@ -1,7 +1,7 @@
 # USB HID (Human Interface Device) gadget.
 #
 # Usage:
-#   usb-gadget up hid.toml
+#   gadgetry-most-foul up hid.toml
 
 name = "hid"
 # udc = "dummy_udc.0"

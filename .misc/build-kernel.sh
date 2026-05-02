@@ -72,7 +72,7 @@ for cmd in vng zstd make gcc flex bison; do
 done
 
 echo "Kernel version:  $KERNEL_VERSION"
-echo "Config snippet:  $SCRIPT_DIR/usb-gadget.config"
+echo "Config snippet:  $SCRIPT_DIR/gadgetry-most-foul.config"
 echo "Working dir:     $WORK_DIR"
 echo "Output:          $OUTPUT"
 echo ""
@@ -101,7 +101,7 @@ echo ""
 echo "Building kernel (this takes a few minutes)..."
 cd "$KERNEL_SRC"
 
-time vng --build --config "$SCRIPT_DIR/usb-gadget.config" --force
+time vng --build --config "$SCRIPT_DIR/gadgetry-most-foul.config" --force
 
 echo ""
 
@@ -123,7 +123,7 @@ done
 if [ "$MISSING" = true ]; then
     echo ""
     echo "ERROR: some required config options are not set." >&2
-    echo "Check .misc/usb-gadget.config and kernel dependency changes." >&2
+    echo "Check .misc/gadgetry-most-foul.config and kernel dependency changes." >&2
     exit 1
 fi
 echo "  All required options present."
@@ -164,7 +164,7 @@ cat > "$STAGING/boot/kernel-info.txt" <<EOF
 version=$KVER_FULL
 base_version=$KERNEL_VERSION
 build_date=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-config_snippet=.misc/usb-gadget.config
+config_snippet=.misc/gadgetry-most-foul.config
 EOF
 
 echo ""
@@ -210,4 +210,3 @@ echo "  Modules:    $MODULES_COUNT total"
 echo "  Tarball:    $OUTPUT"
 echo "  Size:       $TARBALL_SIZE"
 echo "════════════════════════════════════════════════════════"
-

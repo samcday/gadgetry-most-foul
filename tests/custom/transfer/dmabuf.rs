@@ -68,8 +68,8 @@ fn wait_sync_file(fd: &OwnedFd, timeout: Duration) -> io::Result<()> {
 // ─── Device side ────────────────────────────────────────────────────
 
 fn run_device_dmabuf(
-    mut custom: Custom, mut ep_rx: usb_gadget::function::custom::EndpointReceiver,
-    mut ep_tx: usb_gadget::function::custom::EndpointSender, dmabuf: &DmaBuf,
+    mut custom: Custom, mut ep_rx: gadgetry_most_foul::function::custom::EndpointReceiver,
+    mut ep_tx: gadgetry_most_foul::function::custom::EndpointSender, dmabuf: &DmaBuf,
 ) {
     let stop = AtomicBool::new(false);
 

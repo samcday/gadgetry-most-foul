@@ -16,7 +16,7 @@ use std::{
     time::Duration,
 };
 
-use usb_gadget::{
+use gadgetry_most_foul::{
     default_udc,
     function::custom::{Custom, Endpoint, EndpointDirection, EndpointReceiver, EndpointSender, Event, Interface},
     Class, Config, Gadget, Id, OsDescriptor, Strings, WebUsb,
@@ -52,7 +52,7 @@ fn main() {
     } else {
         let (mut custom, handle) = builder.build();
 
-        usb_gadget::remove_all().expect("cannot remove all gadgets");
+        gadgetry_most_foul::remove_all().expect("cannot remove all gadgets");
 
         let udc = default_udc().expect("cannot get UDC");
         let gadget = Gadget::new(

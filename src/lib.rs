@@ -48,7 +48,7 @@
 #![cfg_attr(docsrs, feature(doc_cfg))]
 
 #[cfg(not(target_os = "linux"))]
-compile_error!("usb_gadget only supports Linux");
+compile_error!("gadgetry_most_foul only supports Linux");
 
 use proc_mounts::MountIter;
 use std::{

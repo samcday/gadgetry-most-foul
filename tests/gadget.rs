@@ -7,7 +7,7 @@ use serial_test::serial;
 fn registered_gadgets() {
     init();
 
-    let reg = usb_gadget::registered().unwrap();
+    let reg = gadgetry_most_foul::registered().unwrap();
     for gadget in reg {
         println!("Gadget {gadget:?} at {}", gadget.path().display());
         println!("UDC: {:?}", gadget.udc().unwrap());
@@ -20,7 +20,7 @@ fn registered_gadgets() {
 fn remove_all_gadgets() {
     init();
 
-    usb_gadget::remove_all().unwrap();
+    gadgetry_most_foul::remove_all().unwrap();
 }
 
 #[test]
@@ -28,5 +28,5 @@ fn remove_all_gadgets() {
 fn unbind_all_gadgets() {
     init();
 
-    usb_gadget::unbind_all().unwrap();
+    gadgetry_most_foul::unbind_all().unwrap();
 }

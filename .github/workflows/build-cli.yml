@@ -24,11 +24,11 @@ jobs:
       matrix:
         include:
           - target: x86_64-unknown-linux-musl
-            artifact: usb-gadget-x86_64-linux-musl
+            artifact: gadgetry-most-foul-x86_64-linux-musl
           - target: aarch64-unknown-linux-musl
-            artifact: usb-gadget-aarch64-linux-musl
+            artifact: gadgetry-most-foul-aarch64-linux-musl
           - target: armv7-unknown-linux-musleabihf
-            artifact: usb-gadget-armv7-linux-musleabihf
+            artifact: gadgetry-most-foul-armv7-linux-musleabihf
 
     steps:
       - uses: actions/checkout@v6
@@ -43,7 +43,7 @@ jobs:
         run: cross build --release --features cli --target ${{ matrix.target }}
 
       - name: Rename binary
-        run: cp target/${{ matrix.target }}/release/usb-gadget ${{ matrix.artifact }}
+        run: cp target/${{ matrix.target }}/release/gadgetry-most-foul ${{ matrix.artifact }}
 
       - name: Upload artifact
         uses: actions/upload-artifact@v7
@@ -66,6 +66,6 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            usb-gadget-x86_64-linux-musl/usb-gadget-x86_64-linux-musl
-            usb-gadget-aarch64-linux-musl/usb-gadget-aarch64-linux-musl
-            usb-gadget-armv7-linux-musleabihf/usb-gadget-armv7-linux-musleabihf
+            gadgetry-most-foul-x86_64-linux-musl/gadgetry-most-foul-x86_64-linux-musl
+            gadgetry-most-foul-aarch64-linux-musl/gadgetry-most-foul-aarch64-linux-musl
+            gadgetry-most-foul-armv7-linux-musleabihf/gadgetry-most-foul-armv7-linux-musleabihf

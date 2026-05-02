@@ -2,7 +2,7 @@ mod common;
 use common::*;
 use serial_test::serial;
 
-use usb_gadget::function::other::Other;
+use gadgetry_most_foul::function::other::Other;
 
 #[test]
 #[serial]

@@ -13,7 +13,7 @@ if [ -z "$TARGET" ] ; then
 fi
 
 if [ -z "$TARGET_PATH" ] ; then
-    TARGET_PATH="dev/usb-gadget"
+    TARGET_PATH="dev/gadgetry-most-foul"
 fi
 
 rsync -avz --delete --exclude target --exclude .git "$SCRIPT_PATH/.." "$TARGET:$TARGET_PATH"

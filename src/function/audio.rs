@@ -6,7 +6,7 @@
 //! # UAC1 Example
 //!
 //! ```no_run
-//! use usb_gadget::{
+//! use gadgetry_most_foul::{
 //!     default_udc,
 //!     function::audio::{Channel, Uac1},
 //!     Class, Config, Gadget, Id, Strings,
@@ -37,7 +37,7 @@
 //! # UAC2 Example
 //!
 //! ```no_run
-//! use usb_gadget::{
+//! use gadgetry_most_foul::{
 //!     default_udc,
 //!     function::audio::{Channel, Uac2},
 //!     Class, Config, Gadget, Id, Strings,

@@ -18,7 +18,7 @@ use std::{
     time::Duration,
 };
 
-use usb_gadget::{
+use gadgetry_most_foul::{
     default_udc,
     function::custom::{Custom, Endpoint, EndpointDirection, EndpointReceiver, EndpointSender, Interface},
     Class, Config, Gadget, Id, Strings,
@@ -32,7 +32,7 @@ const VID: u16 = 0x1234;
 const PID: u16 = 0x0010;
 
 /// Sets up a custom USB gadget with one bulk IN and one bulk OUT endpoint.
-fn setup_gadget() -> (usb_gadget::RegGadget, Custom, EndpointReceiver, EndpointSender) {
+fn setup_gadget() -> (gadgetry_most_foul::RegGadget, Custom, EndpointReceiver, EndpointSender) {
     let (ep_rx, ep_rx_dir) = EndpointDirection::host_to_device();
     let (ep_tx, ep_tx_dir) = EndpointDirection::device_to_host();
 

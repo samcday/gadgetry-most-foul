@@ -1,7 +1,7 @@
 # USB Ethernet (ECM) gadget.
 #
 # Usage:
-#   usb-gadget up ethernet.toml
+#   gadgetry-most-foul up ethernet.toml
 
 name = "ethernet"
 # udc = "dummy_udc.0"

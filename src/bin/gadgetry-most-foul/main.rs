@@ -1,4 +1,4 @@
-//! usb-gadget CLI tool — configure USB gadgets from TOML files.
+//! gadgetry-most-foul CLI tool — configure USB gadgets from TOML files.
 
 mod build;
 mod config;
@@ -12,13 +12,13 @@ use std::{
 
 use clap::{CommandFactory, Parser, Subcommand};
 use clap_complete::{generate, Shell};
-use usb_gadget::{default_udc, registered, remove_all, udcs, Udc};
+use gadgetry_most_foul::{default_udc, registered, remove_all, udcs, Udc};
 
 use crate::config::GadgetConfig;
 
 /// USB gadget configuration tool.
 #[derive(Parser)]
-#[command(name = "usb-gadget", version, about = "Configure USB gadgets from TOML files")]
+#[command(name = "gadgetry-most-foul", version, about = "Configure USB gadgets from TOML files")]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -173,7 +173,7 @@ fn cmd_list() -> Result<()> {
 }
 
 /// Format function list for display, collapsing duplicates.
-fn format_functions(functions: &[usb_gadget::RegFunction]) -> String {
+fn format_functions(functions: &[gadgetry_most_foul::RegFunction]) -> String {
     use std::collections::BTreeMap;
     let mut counts: BTreeMap<&str, usize> = BTreeMap::new();
     for f in functions {
@@ -293,7 +293,7 @@ fn cmd_template(name: Option<&str>, list: bool) -> Result<()> {
             println!("  {tname}");
         }
         if !list {
-            println!("\nUsage: usb-gadget template <name>");
+            println!("\nUsage: gadgetry-most-foul template <name>");
         }
         return Ok(());
     }
@@ -312,6 +312,6 @@ fn cmd_template(name: Option<&str>, list: bool) -> Result<()> {
 
 fn cmd_completions(shell: Shell) -> Result<()> {
     let mut cmd = Cli::command();
-    generate(shell, &mut cmd, "usb-gadget", &mut io::stdout().lock());
+    generate(shell, &mut cmd, "gadgetry-most-foul", &mut io::stdout().lock());
     Ok(())
 }

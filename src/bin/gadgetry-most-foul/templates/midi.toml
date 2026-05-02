@@ -1,7 +1,7 @@
 # USB MIDI gadget.
 #
 # Usage:
-#   usb-gadget up midi.toml
+#   gadgetry-most-foul up midi.toml
 
 name = "midi"
 # udc = "dummy_udc.0"

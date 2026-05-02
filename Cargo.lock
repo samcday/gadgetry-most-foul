@@ -299,6 +299,33 @@ dependencies = [
 ]
 
 [[package]]
+name = "gadgetry-most-foul"
+version = "1.1.1"
+dependencies = [
+ "bitflags",
+ "byteorder",
+ "bytes",
+ "clap",
+ "clap_complete",
+ "dma-buf",
+ "dma-heap",
+ "env_logger",
+ "libc",
+ "log",
+ "macaddr",
+ "nusb",
+ "proc-mounts",
+ "rustix",
+ "serde",
+ "serial_test",
+ "strum",
+ "tempfile",
+ "tokio",
+ "toml",
+ "uuid",
+]
+
+[[package]]
 name = "getrandom"
 version = "0.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -946,33 +973,6 @@ name = "unicode-xid"
 version = "0.2.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ebc1c04c71510c7f702b52b7c350734c9ff1295c464a03335b00bb84fc54f853"
-
-[[package]]
-name = "usb-gadget"
-version = "1.1.1"
-dependencies = [
- "bitflags",
- "byteorder",
- "bytes",
- "clap",
- "clap_complete",
- "dma-buf",
- "dma-heap",
- "env_logger",
- "libc",
- "log",
- "macaddr",
- "nusb",
- "proc-mounts",
- "rustix",
- "serde",
- "serial_test",
- "strum",
- "tempfile",
- "tokio",
- "toml",
- "uuid",
-]
 
 [[package]]
 name = "utf8parse"

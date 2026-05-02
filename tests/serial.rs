@@ -1,7 +1,7 @@
 use std::os::unix::prelude::FileTypeExt;
 
+use gadgetry_most_foul::function::serial::{Serial, SerialClass};
 use serial_test::serial;
-use usb_gadget::function::serial::{Serial, SerialClass};
 
 mod common;
 use common::*;
@@ -79,9 +79,9 @@ fn generic_serial() {
 #[tokio::test]
 #[serial]
 async fn serial_status() {
+    use gadgetry_most_foul::function::util::State;
     use std::time::Duration;
     use tokio::time::sleep;
-    use usb_gadget::function::util::State;
 
     init();
 

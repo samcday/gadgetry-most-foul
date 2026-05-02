@@ -7,7 +7,7 @@
 //! ```no_run
 //! use bytes::{Bytes, BytesMut};
 //! use std::{thread, time::Duration};
-//! use usb_gadget::{
+//! use gadgetry_most_foul::{
 //!     default_udc,
 //!     function::custom::{Custom, Endpoint, EndpointDirection, Event, Interface},
 //!     Class, Config, Gadget, Id, Strings,
@@ -120,7 +120,7 @@ fn into_read_buffer(buf: aio::Buffer) -> Result<BytesMut> {
 /// Use [`Interface::with_custom_desc`] to attach it to an interface:
 ///
 /// ```no_run
-/// use usb_gadget::{
+/// use gadgetry_most_foul::{
 ///     function::custom::{DfuDesc, Interface},
 ///     Class,
 /// };

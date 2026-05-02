@@ -1,11 +1,11 @@
 [package]
-name = "usb-gadget"
+name = "gadgetry-most-foul"
 description = "Expose standard or fully custom USB peripherals (gadgets) through a USB device controller (UDC) on Linux."
 categories = ["hardware-support", "os::linux-apis"]
 keywords = ["usb", "gadget", "peripheral", "configfs", "functionfs"]
 license = "Apache-2.0"
-repository = "https://github.com/surban/usb-gadget"
-authors = ["Sebastian Urban <surban@surban.net>", "usb-gadget authors"]
+repository = "https://github.com/samcday/gadgetry-most-foul"
+authors = ["Sebastian Urban <surban@surban.net>", "gadgetry-most-foul authors"]
 rust-version = "1.77"
 version = "1.1.1"
 edition = "2021"
@@ -47,8 +47,8 @@ required-features = ["tokio"]
 doc-scrape-examples = true
 
 [[bin]]
-name = "usb-gadget"
-path = "src/bin/usb-gadget/main.rs"
+name = "gadgetry-most-foul"
+path = "src/bin/gadgetry-most-foul/main.rs"
 required-features = ["cli"]
 
 [package.metadata.docs.rs]

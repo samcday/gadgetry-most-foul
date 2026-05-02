@@ -12,7 +12,7 @@ use std::{
     time::Duration,
 };
 
-use usb_gadget::function::custom::Custom;
+use gadgetry_most_foul::function::custom::Custom;
 
 use super::*;
 
@@ -22,8 +22,8 @@ const PID: u16 = 0x0020;
 
 /// Device side: pipelined IO with recv_timeout / send_timeout.
 fn run_device_pipelined(
-    mut custom: Custom, mut ep_rx: usb_gadget::function::custom::EndpointReceiver,
-    mut ep_tx: usb_gadget::function::custom::EndpointSender,
+    mut custom: Custom, mut ep_rx: gadgetry_most_foul::function::custom::EndpointReceiver,
+    mut ep_tx: gadgetry_most_foul::function::custom::EndpointSender,
 ) {
     let stop = Arc::new(AtomicBool::new(false));
     let stop_rx = stop.clone();

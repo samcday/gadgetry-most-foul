@@ -2,7 +2,7 @@ mod common;
 use common::*;
 use serial_test::serial;
 
-use usb_gadget::function::video::{ColorMatching, Format, Frame, Uvc, UvcFrame};
+use gadgetry_most_foul::function::video::{ColorMatching, Format, Frame, Uvc, UvcFrame};
 
 #[test]
 #[serial]

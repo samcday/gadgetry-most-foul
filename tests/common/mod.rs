@@ -3,11 +3,11 @@
 
 use std::{env, io::Result, sync::Once, thread::sleep, time::Duration};
 
-use nusb::MaybeFuture;
-use usb_gadget::{
+use gadgetry_most_foul::{
     default_udc, function::Handle, registered, Class, Config, Gadget, Id, OsDescriptor, RegGadget, Strings,
     WebUsb,
 };
+use nusb::MaybeFuture;
 
 pub const TEST_VID: u16 = 4;
 pub const TEST_PID: u16 = 5;

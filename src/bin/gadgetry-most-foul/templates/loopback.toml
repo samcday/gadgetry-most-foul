@@ -2,7 +2,7 @@
 # Echoes data from OUT endpoint back to IN endpoint.
 #
 # Usage:
-#   usb-gadget up loopback.toml
+#   gadgetry-most-foul up loopback.toml
 
 name = "loopback"
 # udc = "dummy_udc.0"

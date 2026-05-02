@@ -1,7 +1,7 @@
 # USB Video Class (UVC) webcam gadget.
 #
 # Usage:
-#   usb-gadget up webcam.toml
+#   gadgetry-most-foul up webcam.toml
 
 name = "webcam"
 # udc = "dummy_udc.0"

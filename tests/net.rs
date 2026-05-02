@@ -2,10 +2,10 @@ mod common;
 use common::*;
 use serial_test::serial;
 
+use gadgetry_most_foul::function::net::{Net, NetClass};
 use macaddr::MacAddr6;
 use nusb::MaybeFuture;
 use std::{num::NonZeroU8, time::Duration};
-use usb_gadget::function::net::{Net, NetClass};
 
 fn net(net_class: NetClass) {
     init();

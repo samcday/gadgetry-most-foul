@@ -1,13 +1,13 @@
 use std::{thread, time::Duration};
 use uuid::uuid;
 
-use nusb::MaybeFuture;
-use serial_test::serial;
-use usb_gadget::{
+use gadgetry_most_foul::{
     default_udc,
     function::custom::{Custom, Endpoint, EndpointDirection, Interface, OsExtCompat, OsExtProp},
     Class,
 };
+use nusb::MaybeFuture;
+use serial_test::serial;
 
 #[path = "../common/mod.rs"]
 mod common;

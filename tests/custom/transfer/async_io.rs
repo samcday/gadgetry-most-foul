@@ -3,7 +3,7 @@
 use bytes::BytesMut;
 use std::{sync::Arc, time::Duration};
 
-use usb_gadget::function::custom::Event;
+use gadgetry_most_foul::function::custom::Event;
 
 use super::*;
 
@@ -11,8 +11,8 @@ const VID: u16 = 0x1234;
 const PID: u16 = 0x0020;
 
 async fn run_device_async(
-    mut custom: Custom, mut ep_rx: usb_gadget::function::custom::EndpointReceiver,
-    mut ep_tx: usb_gadget::function::custom::EndpointSender,
+    mut custom: Custom, mut ep_rx: gadgetry_most_foul::function::custom::EndpointReceiver,
+    mut ep_tx: gadgetry_most_foul::function::custom::EndpointSender,
 ) {
     use tokio::sync::Notify;
 

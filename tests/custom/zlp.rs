@@ -3,7 +3,6 @@
 //! Each test sets up a gadget and runs both device and host sides
 //! in separate threads within the same process.
 
-use bytes::{Bytes, BytesMut};
 use nusb::{
     transfer::{Buffer, Bulk, Direction, In, Out},
     MaybeFuture,
@@ -20,7 +19,7 @@ use std::{
 
 use gadgetry_most_foul::{
     default_udc,
-    function::custom::{Custom, Endpoint, EndpointDirection, EndpointReceiver, EndpointSender, Interface},
+    function::custom::{Custom, Endpoint, EndpointDirection, EndpointIn, EndpointOut, Interface},
     Class, Config, Gadget, Id, Strings,
 };
 
@@ -32,7 +31,7 @@ const VID: u16 = 0x1234;
 const PID: u16 = 0x0010;
 
 /// Sets up a custom USB gadget with one bulk IN and one bulk OUT endpoint.
-fn setup_gadget() -> (gadgetry_most_foul::RegGadget, Custom, EndpointReceiver, EndpointSender) {
+fn setup_gadget() -> (gadgetry_most_foul::RegGadget, Custom, EndpointOut, EndpointIn) {
     let (ep_rx, ep_rx_dir) = EndpointDirection::host_to_device();
     let (ep_tx, ep_tx_dir) = EndpointDirection::device_to_host();
 
@@ -110,7 +109,7 @@ fn run_event_loop(mut custom: Custom, stop: Arc<AtomicBool>) {
 // ─── Test 1: Receive ZLP with MPS-sized buffer ──────────────────────
 //
 // Host sends MPS bytes of 0xAA followed by a ZLP.
-// Device reads with MPS-sized buffer → gets data, then ZLP separately.
+// Device reads exactly MPS bytes, then verifies the ZLP is rejected as a short exact read.
 
 #[test]
 #[serial]
@@ -132,16 +131,20 @@ fn zlp_recv_mps_buffer() {
             let mps = ep_rx.max_packet_size().unwrap();
             println!("device: RX MPS={mps}, receiving with MPS-sized buffer");
 
-            let data =
-                ep_rx.recv_and_fetch_timeout(BytesMut::with_capacity(mps), TIMEOUT).expect("recv data failed");
+            let mut data = vec![0; mps];
+            ep_rx.read_exact_timeout(&mut data, TIMEOUT).expect("recv data failed");
             assert_eq!(data.len(), mps, "expected {mps} bytes, got {}", data.len());
             assert!(data.iter().all(|&b| b == 0xAA), "expected all 0xAA");
             println!("device: read {mps} bytes of 0xAA");
 
-            let zlp =
-                ep_rx.recv_and_fetch_timeout(BytesMut::with_capacity(mps), TIMEOUT).expect("recv ZLP failed");
-            assert_eq!(zlp.len(), 0, "expected ZLP (0 bytes), got {}", zlp.len());
-            println!("device: received ZLP");
+            let mut zlp = vec![0; mps];
+            match ep_rx.read_exact_timeout(&mut zlp, TIMEOUT) {
+                Err(e) if e.kind() == ErrorKind::UnexpectedEof => {
+                    println!("device: ZLP rejected as exact-transfer protocol error");
+                }
+                Ok(()) => panic!("device: expected ZLP exact read to fail"),
+                Err(e) => panic!("device: unexpected ZLP read error: {e}"),
+            }
         });
 
         let stop_host = stop.clone();
@@ -192,23 +195,12 @@ fn zlp_recv_large_buffer() {
             let buf_size = mps * 2;
             println!("device: RX MPS={mps}, receiving with oversized buffer ({buf_size} bytes)");
 
-            let data = ep_rx
-                .recv_and_fetch_timeout(BytesMut::with_capacity(buf_size), TIMEOUT)
-                .expect("recv data failed");
-            println!("device: read {} bytes (buffer was {buf_size})", data.len());
-            assert_eq!(data.len(), mps, "expected exactly {mps} bytes, got {}", data.len());
-            assert!(data.iter().all(|&b| b == 0xBB), "expected all 0xBB");
-
-            // The ZLP is consumed as transfer terminator by the oversized buffer,
-            // so a second read must time out (issue #17).
-            println!("device: verifying ZLP was consumed as transfer terminator...");
-            match ep_rx.recv_and_fetch_timeout(BytesMut::with_capacity(buf_size), Duration::from_secs(2)) {
-                Err(e) if e.kind() == ErrorKind::TimedOut => {
-                    println!("device: timed out as expected — ZLP consumed as transfer terminator");
+            let mut data = vec![0; buf_size];
+            match ep_rx.read_exact_timeout(&mut data, TIMEOUT) {
+                Err(e) if e.kind() == ErrorKind::UnexpectedEof => {
+                    println!("device: short packet rejected as exact-transfer protocol error");
                 }
-                Ok(data) => {
-                    panic!("device: expected timeout, but got {} bytes", data.len());
-                }
+                Ok(()) => panic!("device: expected short exact read to fail"),
                 Err(e) => panic!("device: unexpected error: {e}"),
             }
         });
@@ -237,7 +229,7 @@ fn zlp_recv_large_buffer() {
 
 // ─── Test 3: Send standalone ZLP ────────────────────────────────────
 //
-// Device sends a ZLP via Bytes::new(). Host reads and expects 0 bytes.
+// Device sends a ZLP via write_all(&[]). Host reads and expects 0 bytes.
 
 #[test]
 #[serial]
@@ -256,8 +248,7 @@ fn zlp_send_empty() {
         s.spawn(move || run_event_loop(custom, stop_ev));
 
         s.spawn(move || {
-            ep_tx.flush_timeout(TIMEOUT).ok();
-            ep_tx.send_and_flush_timeout(Bytes::new(), TIMEOUT).expect("device: send ZLP failed");
+            ep_tx.write_all_timeout(&[], TIMEOUT).expect("device: send ZLP failed");
             println!("device: sent ZLP");
         });
 
@@ -300,10 +291,9 @@ fn zlp_send_data_then_zlp() {
 
         s.spawn(move || {
             let mps = ep_tx.max_packet_size().unwrap();
-            ep_tx.flush_timeout(TIMEOUT).ok();
-            ep_tx.send_and_flush_timeout(vec![0xDD_u8; mps].into(), TIMEOUT).expect("device: send data failed");
+            ep_tx.write_all_timeout(&vec![0xDD_u8; mps], TIMEOUT).expect("device: send data failed");
             println!("device: sent {mps} bytes of 0xDD");
-            ep_tx.send_and_flush_timeout(Bytes::new(), TIMEOUT).expect("device: send ZLP failed");
+            ep_tx.write_all_timeout(&[], TIMEOUT).expect("device: send ZLP failed");
             println!("device: sent ZLP");
         });
 
@@ -330,11 +320,9 @@ fn zlp_send_data_then_zlp() {
     reg.remove().unwrap();
 }
 
-// ─── Test 5: Send ZLP via send_timeout + flush_timeout (issue #17 item 2) ───
+// ─── Test 5: Send ZLP via exact write_all_timeout ───────────────────
 //
-// Issue #17 reports that send_timeout(Bytes::new()) must be called twice
-// to actually transmit a ZLP. This test verifies that a single
-// send_timeout + flush_timeout properly delivers a ZLP.
+// This verifies that a single exact zero-length write delivers a ZLP.
 
 #[test]
 #[serial]
@@ -354,16 +342,11 @@ fn zlp_send_single_call() {
 
         s.spawn(move || {
             let mps = ep_tx.max_packet_size().unwrap();
-            // Send MPS data + ZLP using the raw send_timeout + flush_timeout API,
-            // exactly as the issue reporter would.
-            ep_tx.flush_timeout(TIMEOUT).ok();
-            ep_tx.send_timeout(vec![0xEE_u8; mps].into(), TIMEOUT).expect("device: enqueue data failed");
-            ep_tx.flush_timeout(TIMEOUT).expect("device: flush data failed");
-            println!("device: sent {mps} bytes of 0xEE via send_timeout+flush");
+            ep_tx.write_all_timeout(&vec![0xEE_u8; mps], TIMEOUT).expect("device: write data failed");
+            println!("device: sent {mps} bytes of 0xEE via write_all_timeout");
 
-            ep_tx.send_timeout(Bytes::new(), TIMEOUT).expect("device: enqueue ZLP failed");
-            ep_tx.flush_timeout(TIMEOUT).expect("device: flush ZLP failed");
-            println!("device: sent ZLP via single send_timeout+flush");
+            ep_tx.write_all_timeout(&[], TIMEOUT).expect("device: write ZLP failed");
+            println!("device: sent ZLP via single write_all_timeout");
         });
 
         let stop_host = stop.clone();
@@ -379,7 +362,7 @@ fn zlp_send_single_call() {
             let c = ep_in.transfer_blocking(Buffer::new(ep_in_mps), TIMEOUT);
             c.status.expect("host: read 2 failed");
             assert_eq!(c.actual_len, 0, "host: expected ZLP (0 bytes), got {}", c.actual_len);
-            println!("host: received ZLP from single send_timeout call");
+            println!("host: received ZLP from single write_all_timeout call");
 
             stop_host.store(true, Ordering::Relaxed);
         });

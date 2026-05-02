@@ -1,6 +1,4 @@
-//! Pipelined synchronous transfer test (recv_timeout / send_timeout).
-
-use bytes::BytesMut;
+//! Pipelined synchronous transfer test (read_exact_timeout / write_all_timeout).
 use nusb::transfer::{ControlIn, ControlOut, ControlType, Recipient};
 use std::{
     io::ErrorKind,
@@ -20,10 +18,10 @@ const ROUNDS: usize = 64;
 const VID: u16 = 0x1234;
 const PID: u16 = 0x0020;
 
-/// Device side: pipelined IO with recv_timeout / send_timeout.
+/// Device side: pipelined exact IO with read_exact_timeout / write_all_timeout.
 fn run_device_pipelined(
-    mut custom: Custom, mut ep_rx: gadgetry_most_foul::function::custom::EndpointReceiver,
-    mut ep_tx: gadgetry_most_foul::function::custom::EndpointSender,
+    mut custom: Custom, mut ep_rx: gadgetry_most_foul::function::custom::EndpointOut,
+    mut ep_tx: gadgetry_most_foul::function::custom::EndpointIn,
 ) {
     let stop = Arc::new(AtomicBool::new(false));
     let stop_rx = stop.clone();
@@ -31,11 +29,12 @@ fn run_device_pipelined(
 
     thread::scope(|s| {
         s.spawn(move || {
-            let size = ep_rx.max_packet_size().unwrap();
+            let size = PACKET_SIZE;
             let mut expected = 0u8;
             while !stop_rx.load(Ordering::Relaxed) {
-                match ep_rx.recv_timeout(BytesMut::with_capacity(size), Duration::from_secs(2)) {
-                    Ok(Some(data)) => {
+                let mut data = vec![0; size];
+                match ep_rx.read_exact_timeout(&mut data, Duration::from_secs(2)) {
+                    Ok(()) => {
                         assert!(
                             data.iter().all(|&x| x == expected),
                             "device recv: expected all 0x{expected:02x}, got {:02x?}",
@@ -43,7 +42,6 @@ fn run_device_pipelined(
                         );
                         expected = expected.wrapping_add(1);
                     }
-                    Ok(None) => {}
                     Err(e) if e.kind() == ErrorKind::TimedOut => {}
                     Err(e) if stop_rx.load(Ordering::Relaxed) => {
                         println!("device recv stopped: {e}");
@@ -55,11 +53,11 @@ fn run_device_pipelined(
         });
 
         s.spawn(move || {
-            let size = ep_tx.max_packet_size().unwrap().min(PACKET_SIZE);
+            let size = PACKET_SIZE;
             let mut b = 0u8;
             while !stop_tx.load(Ordering::Relaxed) {
                 let data = vec![b; size];
-                match ep_tx.send_timeout(data.into(), Duration::from_secs(2)) {
+                match ep_tx.write_all_timeout(&data, Duration::from_secs(2)) {
                     Ok(()) => b = b.wrapping_add(1),
                     Err(e) if e.kind() == ErrorKind::TimedOut => {}
                     Err(e) if stop_tx.load(Ordering::Relaxed) => {

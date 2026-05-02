@@ -5,7 +5,6 @@
 //! the custom function parts (FunctionFS). This example runs
 //! the main gadget logic in an unprivileged process.
 
-use bytes::BytesMut;
 use std::{
     io::ErrorKind,
     sync::{
@@ -18,7 +17,7 @@ use std::{
 
 use gadgetry_most_foul::{
     default_udc,
-    function::custom::{Custom, Endpoint, EndpointDirection, EndpointReceiver, EndpointSender, Event, Interface},
+    function::custom::{Custom, Endpoint, EndpointDirection, EndpointIn, EndpointOut, Event, Interface},
     Class, Config, Gadget, Id, OsDescriptor, Strings, WebUsb,
 };
 
@@ -108,7 +107,7 @@ fn main() {
     }
 }
 
-fn run(mut ep1_rx: EndpointReceiver, mut ep2_tx: EndpointSender, mut custom: Custom) {
+fn run(mut ep1_rx: EndpointOut, mut ep2_tx: EndpointIn, mut custom: Custom) {
     let ep1_control = ep1_rx.control().unwrap();
     println!("ep1 unclaimed: {:?}", ep1_control.unclaimed_fifo());
     println!("ep1 real address: {}", ep1_control.real_address().unwrap());
@@ -128,20 +127,17 @@ fn run(mut ep1_rx: EndpointReceiver, mut ep2_tx: EndpointSender, mut custom: Cus
             let size = ep1_rx.max_packet_size().unwrap();
             let mut b = 0;
             while !stop.load(Ordering::Relaxed) {
-                let data = ep1_rx
-                    .recv_timeout(BytesMut::with_capacity(size), Duration::from_secs(1))
-                    .expect("recv failed");
-                match data {
-                    Some(data) => {
+                let mut data = vec![0; size];
+                match ep1_rx.read_exact_timeout(&mut data, Duration::from_secs(1)) {
+                    Ok(()) => {
                         println!("received {} bytes: {data:x?}", data.len());
                         if !data.iter().all(|x| *x == b) {
                             panic!("wrong data received");
                         }
                         b = b.wrapping_add(1);
                     }
-                    None => {
-                        println!("receive empty");
-                    }
+                    Err(err) if err.kind() == ErrorKind::TimedOut => println!("read timeout"),
+                    Err(err) => panic!("read failed: {err}"),
                 }
             }
         });
@@ -151,7 +147,7 @@ fn run(mut ep1_rx: EndpointReceiver, mut ep2_tx: EndpointSender, mut custom: Cus
             let mut b = 0u8;
             while !stop.load(Ordering::Relaxed) {
                 let data = vec![b; size];
-                match ep2_tx.send_timeout(data.into(), Duration::from_secs(1)) {
+                match ep2_tx.write_all_timeout(&data, Duration::from_secs(1)) {
                     Ok(()) => {
                         println!("sent data {b} of size {size} bytes");
                         b = b.wrapping_add(1);

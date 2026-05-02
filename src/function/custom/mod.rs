@@ -5,7 +5,6 @@
 //! # Example
 //!
 //! ```no_run
-//! use bytes::{Bytes, BytesMut};
 //! use std::{thread, time::Duration};
 //! use gadgetry_most_foul::{
 //!     default_udc,
@@ -52,23 +51,21 @@
 //!     }
 //! });
 //!
-//! // Receive data from host on OUT endpoint.
+//! // Receive exactly one payload from host on OUT endpoint.
 //! thread::spawn(move || loop {
 //!     let size = ep_rx.max_packet_size().unwrap();
-//!     let data = ep_rx.recv(BytesMut::with_capacity(size)).expect("recv failed");
-//!     if let Some(data) = data {
-//!         println!("received {} bytes", data.len());
-//!     }
+//!     let mut data = vec![0; size];
+//!     ep_rx.read_exact(&mut data).expect("read failed");
+//!     println!("received {} bytes", data.len());
 //! });
 //!
-//! // Send data to host on IN endpoint.
+//! // Send exactly one payload to host on IN endpoint.
 //! thread::spawn(move || loop {
-//!     ep_tx.send(Bytes::from_static(b"world")).expect("send failed");
+//!     ep_tx.write_all(b"world").expect("write failed");
 //! });
 //! ```
 
 use byteorder::{WriteBytesExt, LE};
-use bytes::{Bytes, BytesMut};
 use proc_mounts::MountIter;
 use rustix::{
     event::{poll, PollFd, PollFlags},
@@ -105,11 +102,6 @@ pub(crate) fn driver() -> &'static OsStr {
 }
 
 pub use ffs::CustomDesc;
-
-/// Converts an AIO buffer into a read buffer (BytesMut).
-fn into_read_buffer(buf: aio::Buffer) -> Result<BytesMut> {
-    buf.try_into().map_err(|_| Error::new(ErrorKind::InvalidData, "unexpected write buffer in receive queue"))
-}
 
 /// USB DFU (Device Firmware Upgrade) functional descriptor.
 ///
@@ -323,17 +315,17 @@ impl EndpointDirection {
     const DEFAULT_QUEUE_LEN: u32 = 16;
 
     /// From device to host.
-    pub fn device_to_host() -> (EndpointSender, EndpointDirection) {
+    pub fn device_to_host() -> (EndpointIn, EndpointDirection) {
         let (tx, rx) = value::channel();
-        let writer = EndpointSender(rx);
+        let writer = EndpointIn(rx);
         let this = Self { direction: Direction::DeviceToHost, tx, queue_len: Self::DEFAULT_QUEUE_LEN };
         (writer, this)
     }
 
     /// From host to device.
-    pub fn host_to_device() -> (EndpointReceiver, EndpointDirection) {
+    pub fn host_to_device() -> (EndpointOut, EndpointDirection) {
         let (tx, rx) = value::channel();
-        let reader = EndpointReceiver(rx);
+        let reader = EndpointOut(rx);
         let this = Self { direction: Direction::HostToDevice, tx, queue_len: Self::DEFAULT_QUEUE_LEN };
         (reader, this)
     }
@@ -1442,7 +1434,7 @@ impl EndpointIo {
     fn new(path: PathBuf, queue_len: u32) -> Result<(Self, Arc<File>)> {
         log::debug!("opening endpoint file {} with queue length {queue_len}", path.display());
         let file = Arc::new(File::options().read(true).write(true).open(&path)?);
-        let aio = aio::Driver::new(queue_len, Some(path.to_string_lossy().to_string()))?;
+        let aio = aio::Driver::new(queue_len)?;
         Ok((Self { path, file: Arc::downgrade(&file), aio }, file))
     }
 
@@ -1467,16 +1459,16 @@ impl Drop for EndpointIo {
 ///
 /// All control requests are executed immediately, bypassing the send or receive queue.
 #[derive(Debug)]
-pub struct EndpointControl<'a> {
-    io: &'a EndpointIo,
+pub struct EndpointControl {
+    file: Arc<File>,
     direction: Direction,
 }
 
 pub use ffs::{AudioEndpointDesc as RawAudioEndpointDesc, EndpointDesc as RawEndpointDesc};
 
-impl<'a> EndpointControl<'a> {
-    fn new(io: &'a EndpointIo, direction: Direction) -> Self {
-        Self { io, direction }
+impl EndpointControl {
+    fn new(file: Arc<File>, direction: Direction) -> Self {
+        Self { file, direction }
     }
 
     /// Returns how many bytes are "unclaimed" in the endpoint FIFO.
@@ -1489,15 +1481,13 @@ impl<'a> EndpointControl<'a> {
     /// Host-to-device transfers may be reported to the host's "client" driver as
     /// complete when they're sitting in the FIFO unread.
     pub fn unclaimed_fifo(&self) -> Result<usize> {
-        let file = self.io.file()?;
-        let bytes = ffs::fifo_status(file.as_fd())?;
+        let bytes = ffs::fifo_status(self.file.as_fd())?;
         Ok(bytes as usize)
     }
 
     /// Discards any unclaimed data in the endpoint FIFO.
     pub fn discard_fifo(&self) -> Result<()> {
-        let file = self.io.file()?;
-        ffs::fifo_flush(file.as_fd())?;
+        ffs::fifo_flush(self.file.as_fd())?;
         Ok(())
     }
 
@@ -1509,7 +1499,7 @@ impl<'a> EndpointControl<'a> {
     /// Empty the endpoint's request queue first, to make sure no
     /// inappropriate transfers happen.
     pub fn halt(&self) -> Result<()> {
-        let mut file = self.io.file()?;
+        let mut file = &*self.file;
         let mut buf = [0; 1];
         match self.direction {
             Direction::DeviceToHost => {
@@ -1528,30 +1518,26 @@ impl<'a> EndpointControl<'a> {
     /// for endpoints that are not reconfigured, after clearing any other state
     /// in the endpoint's IO queue.
     pub fn clear_halt(&self) -> Result<()> {
-        let file = self.io.file()?;
-        ffs::clear_halt(file.as_fd())?;
+        ffs::clear_halt(self.file.as_fd())?;
         Ok(())
     }
 
     /// Returns real `bEndpointAddress` of the endpoint.
     pub fn real_address(&self) -> Result<u8> {
-        let file = self.io.file()?;
-        let address = ffs::endpoint_revmap(file.as_fd())?;
+        let address = ffs::endpoint_revmap(self.file.as_fd())?;
         Ok(address as u8)
     }
 
     /// Returns the endpoint descriptor in-use.
     pub fn descriptor(&self) -> Result<RawEndpointDesc> {
-        let file = self.io.file()?;
         let mut data = [0; ffs::EndpointDesc::AUDIO_SIZE];
-        ffs::endpoint_desc(file.as_fd(), &mut data)?;
+        ffs::endpoint_desc(self.file.as_fd(), &mut data)?;
         ffs::EndpointDesc::parse(&data)
     }
 
     /// File descriptor of this endpoint.
-    pub fn fd(&mut self) -> Result<RawFd> {
-        let file = self.io.file()?;
-        Ok(file.as_raw_fd())
+    pub fn fd(&self) -> Result<RawFd> {
+        Ok(self.as_raw_fd())
     }
 
     /// Attaches a DMA-BUF to this endpoint for zero-copy transfers.
@@ -1564,14 +1550,12 @@ impl<'a> EndpointControl<'a> {
     /// Requires kernel 6.9 or later and a UDC driver with scatter-gather
     /// support (e.g. dwc3).
     pub fn dmabuf_attach(&self, dmabuf: BorrowedFd<'_>) -> Result<()> {
-        let file = self.io.file()?;
-        ffs::dmabuf_attach(file.as_fd(), dmabuf.as_raw_fd())
+        ffs::dmabuf_attach(self.file.as_fd(), dmabuf.as_raw_fd())
     }
 
     /// Detaches a previously attached DMA-BUF from this endpoint.
     pub fn dmabuf_detach(&self, dmabuf: BorrowedFd<'_>) -> Result<()> {
-        let file = self.io.file()?;
-        ffs::dmabuf_detach(file.as_fd(), dmabuf.as_raw_fd())
+        ffs::dmabuf_detach(self.file.as_fd(), dmabuf.as_raw_fd())
     }
 
     /// Queues a DMA-BUF transfer on this endpoint.
@@ -1586,49 +1570,48 @@ impl<'a> EndpointControl<'a> {
     /// The DMA-BUF must have been previously attached with
     /// [`dmabuf_attach`](Self::dmabuf_attach).
     pub fn dmabuf_transfer(&self, dmabuf: BorrowedFd<'_>, length: u64) -> Result<()> {
-        let file = self.io.file()?;
         let req = ffs::DmaBufTransferReq { fd: dmabuf.as_raw_fd(), flags: 0, length };
-        ffs::dmabuf_transfer(file.as_fd(), &req)
+        ffs::dmabuf_transfer(self.file.as_fd(), &req)
     }
 }
 
-/// USB endpoint from device to host sender.
-///
-/// Sending is asynchronous and uses a queue backed by Linux AIO. Data is
-/// enqueued with [`send`](Self::send) (or [`try_send`](Self::try_send) /
-/// [`send_async`](Self::send_async)) and submitted to the kernel immediately.
-/// The kernel performs the actual USB transfer in the background.
-///
-/// To wait for all enqueued transfers to complete, call [`flush`](Self::flush).
-/// For a combined enqueue-and-wait operation, use
-/// [`send_and_flush`](Self::send_and_flush).
-///
-/// [`send`](Self::send), [`send_async`](Self::send_async) and
-/// [`send_timeout`](Self::send_timeout) automatically wait for queue space.
-/// When using [`try_send`](Self::try_send) directly, call
-/// [`ready`](Self::ready), [`ready_timeout`](Self::ready_timeout), or
-/// [`try_ready`](Self::try_ready) first to ensure space is available.
-/// These also surface errors from previously completed transfers.
-///
-/// # Buffer size and throughput
-///
-/// For best throughput, send data in chunks **much larger** than the endpoint's
-/// maximum packet size (MPS). This allows the kernel to submit multi-packet
-/// USB transfers and reduces per-packet overhead. A good starting point is a
-/// chunk size that is a multiple of the MPS and at least several KiB
-/// (e.g. 16 KiB). Use [`max_packet_size`](Self::max_packet_size) to query the
-/// negotiated MPS at runtime.
-///
-/// Also consider increasing the [queue depth](EndpointDirection::queue_len)
-/// (default: 16) so multiple transfers can be in flight simultaneously.
-#[derive(Debug)]
-pub struct EndpointSender(value::Receiver<EndpointIo>);
+impl AsFd for EndpointControl {
+    fn as_fd(&self) -> BorrowedFd<'_> {
+        self.file.as_fd()
+    }
+}
 
-impl EndpointSender {
+impl AsRawFd for EndpointControl {
+    fn as_raw_fd(&self) -> RawFd {
+        self.file.as_raw_fd()
+    }
+}
+
+const TARGET_AIO_CHUNK_SIZE: usize = 16 * 1024;
+
+fn exact_aio_chunk_size(max_packet_size: usize) -> usize {
+    if max_packet_size == 0 {
+        return TARGET_AIO_CHUNK_SIZE;
+    }
+
+    let packets = (TARGET_AIO_CHUNK_SIZE / max_packet_size).max(1);
+    packets * max_packet_size
+}
+
+/// USB endpoint from device to host.
+///
+/// [`write_all`](Self::write_all) completes only after all bytes from the
+/// caller-provided slice have been transferred to the host. Internally the
+/// transfer may be split into multiple MPS-aligned Linux AIO requests, but no
+/// ownership of the caller's buffer is taken.
+#[derive(Debug)]
+pub struct EndpointIn(value::Receiver<EndpointIo>);
+
+impl EndpointIn {
     /// Gets the endpoint control interface.
-    pub fn control(&'_ mut self) -> Result<EndpointControl<'_>> {
+    pub fn control(&'_ mut self) -> Result<EndpointControl> {
         let io = self.0.get()?;
-        Ok(EndpointControl::new(io, Direction::DeviceToHost))
+        Ok(EndpointControl::new(io.file()?, Direction::DeviceToHost))
     }
 
     /// Maximum packet size.
@@ -1636,262 +1619,57 @@ impl EndpointSender {
         Ok(self.control()?.descriptor()?.max_packet_size.into())
     }
 
-    /// Send data synchronously.
-    ///
-    /// Blocks until the send operation completes and returns its result.
-    pub fn send_and_flush(&mut self, data: Bytes) -> Result<()> {
-        self.send(data)?;
-        self.flush()
+    fn chunk_size(&mut self) -> Result<usize> {
+        Ok(exact_aio_chunk_size(self.max_packet_size()?))
     }
 
-    /// Send data synchronously with a timeout.
+    /// Write exactly all bytes in `data` to the host.
     ///
-    /// Blocks until the send operation completes and returns its result.
-    pub fn send_and_flush_timeout(&mut self, data: Bytes, timeout: Duration) -> Result<()> {
-        self.send(data)?;
-
-        let res = self.flush_timeout(timeout);
-        if res.is_err() {
-            self.cancel()?;
-        }
-        res
-    }
-
-    /// Enqueue data for sending.
-    ///
-    /// Blocks until send space is available.
-    /// Also returns errors of previously enqueued send operations.
-    pub fn send(&mut self, data: Bytes) -> Result<()> {
-        self.ready()?;
-        self.try_send(data)
-    }
-
-    /// Asynchronously Enqueue data for sending.
-    ///
-    /// Waits until send space is available.
-    /// Also returns errors of previously enqueued send operations.
-    #[cfg(feature = "tokio")]
-    pub async fn send_async(&mut self, data: Bytes) -> Result<()> {
-        self.wait_ready().await?;
-        self.try_send(data)
-    }
-
-    /// Enqueue data for sending with a timeout.
-    ///
-    /// Blocks until send space is available with the specified timeout.
-    /// Also returns errors of previously enqueued send operations.
-    pub fn send_timeout(&mut self, data: Bytes, timeout: Duration) -> Result<()> {
-        self.ready_timeout(timeout)?;
-        self.try_send(data)
-    }
-
-    /// Enqueue data for sending without waiting for send space.
-    ///
-    /// Fails if no send space is available.
-    /// Also returns errors of previously enqueued send operations.
-    pub fn try_send(&mut self, data: Bytes) -> Result<()> {
-        self.try_ready()?;
-
+    /// A zero-length slice queues a zero-length packet.
+    pub fn write_all(&mut self, data: &[u8]) -> Result<()> {
+        let chunk_size = self.chunk_size()?;
         let io = self.0.get()?;
         let file = io.file()?;
-        io.aio.submit(aio::opcode::PWRITE, file.as_raw_fd(), data)?;
-        Ok(())
+        io.aio.write_all(file.as_raw_fd(), data, chunk_size, None)
     }
 
-    /// Whether send space is available.
+    /// Write exactly all bytes in `data` to the host, timing out while waiting for completion.
     ///
-    /// Send space will only become available when [`ready`](Self::ready),
-    /// [`ready_timeout`](Self::ready_timeout) or [`try_ready`](Self::try_ready) are called.
-    pub fn is_ready(&mut self) -> bool {
-        let Ok(io) = self.0.get() else { return false };
-        !io.aio.is_full()
+    /// The timeout applies to the whole logical transfer, not to each internal
+    /// AIO chunk.
+    pub fn write_all_timeout(&mut self, data: &[u8], timeout: Duration) -> Result<()> {
+        let chunk_size = self.chunk_size()?;
+        let io = self.0.get()?;
+        let file = io.file()?;
+        io.aio.write_all(file.as_raw_fd(), data, chunk_size, Some(timeout))
     }
 
-    /// Whether the send queue is empty.
+    /// Write exactly all bytes in `data` to the host asynchronously.
     ///
-    /// The send queue will only be drained when [`ready`](Self::ready),
-    /// [`ready_timeout`](Self::ready_timeout) or [`try_ready`](Self::try_ready) are called.
-    pub fn is_empty(&mut self) -> bool {
-        let Ok(io) = self.0.get() else { return true };
-        io.aio.is_empty()
-    }
-
-    /// Asynchronously wait for send space to be available.
-    ///
-    /// Also returns errors of previously enqueued send operations.
+    /// Dropping this future cancels and reaps all in-flight AIO chunks
+    /// before releasing the borrow of `data`.
     #[cfg(feature = "tokio")]
-    pub async fn wait_ready(&mut self) -> Result<()> {
+    pub async fn write_all_async(&mut self, data: &[u8]) -> Result<()> {
+        let chunk_size = self.chunk_size()?;
         let io = self.0.get()?;
-
-        while io.aio.is_full() {
-            let comp = io.aio.wait_completed().await.unwrap();
-            comp.result()?;
-        }
-
-        Ok(())
-    }
-
-    /// Wait for send space to be available.
-    ///
-    /// Also returns errors of previously enqueued send operations.
-    pub fn ready(&mut self) -> Result<()> {
-        let io = self.0.get()?;
-
-        while io.aio.is_full() {
-            let comp = io.aio.completed().unwrap();
-            comp.result()?;
-        }
-
-        Ok(())
-    }
-
-    /// Wait for send space to be available with a timeout.
-    ///
-    /// Also returns errors of previously enqueued send operations.
-    pub fn ready_timeout(&mut self, timeout: Duration) -> Result<()> {
-        let io = self.0.get()?;
-
-        while io.aio.is_full() {
-            let comp = io
-                .aio
-                .completed_timeout(timeout)
-                .ok_or_else(|| Error::new(ErrorKind::TimedOut, "timeout waiting for send space"))?;
-            comp.result()?;
-        }
-
-        Ok(())
-    }
-
-    /// Check for availability of send space.
-    ///
-    /// Also returns errors of previously enqueued send operations.
-    pub fn try_ready(&mut self) -> Result<()> {
-        let io = self.0.get()?;
-
-        while let Some(comp) = io.aio.try_completed() {
-            comp.result()?;
-        }
-
-        Ok(())
-    }
-
-    /// Waits for all enqueued data to be sent.
-    ///
-    /// Returns an error if any enqueued send operation has failed.
-    pub fn flush(&mut self) -> Result<()> {
-        let io = self.0.get()?;
-
-        while let Some(comp) = io.aio.completed() {
-            comp.result()?;
-        }
-
-        Ok(())
-    }
-
-    /// Waits for all enqueued data to be sent.
-    ///
-    /// Returns an error if any enqueued send operation has failed.
-    #[cfg(feature = "tokio")]
-    pub async fn flush_async(&mut self) -> Result<()> {
-        let io = self.0.get()?;
-
-        while let Some(comp) = io.aio.wait_completed().await {
-            comp.result()?;
-        }
-
-        Ok(())
-    }
-
-    /// Waits for all enqueued data to be sent with a timeout.
-    ///
-    /// Returns an error if any enqueued send operation has failed.
-    pub fn flush_timeout(&mut self, timeout: Duration) -> Result<()> {
-        let io = self.0.get()?;
-
-        while let Some(comp) = io.aio.completed_timeout(timeout) {
-            comp.result()?;
-        }
-
-        if io.aio.is_empty() {
-            Ok(())
-        } else {
-            Err(Error::new(ErrorKind::TimedOut, "timeout waiting for send to complete"))
-        }
-    }
-
-    /// Removes all data from the send queue and clears all errors.
-    pub fn cancel(&mut self) -> Result<()> {
-        let io = self.0.get()?;
-
-        io.aio.cancel_all();
-        while io.aio.completed().is_some() {}
-
-        Ok(())
+        let file = io.file()?;
+        io.aio.write_all_async(file, data, chunk_size).await
     }
 }
 
-/// USB endpoint from host to device receiver.
+/// USB endpoint from host to device.
 ///
-/// Receiving is asynchronous and uses a queue backed by Linux AIO. Empty
-/// buffers are enqueued with [`recv`](Self::recv) (or [`try_recv`](Self::try_recv) /
-/// [`recv_async`](Self::recv_async)) and submitted to the kernel, which fills
-/// them in the background as USB data arrives.
-///
-/// Filled buffers are retrieved with [`fetch`](Self::fetch),
-/// [`fetch_timeout`](Self::fetch_timeout), or [`try_fetch`](Self::try_fetch).
-/// For a combined enqueue-and-wait operation, use
-/// [`recv_and_fetch`](Self::recv_and_fetch).
-///
-/// [`recv`](Self::recv), [`recv_async`](Self::recv_async) and
-/// [`recv_timeout`](Self::recv_timeout) automatically wait for queue space
-/// by fetching completed buffers, which they return.
-/// When using [`try_recv`](Self::try_recv) directly, call
-/// [`is_ready`](Self::is_ready) first or fetch completed buffers
-/// to ensure space is available.
-///
-/// # Buffer size and throughput
-///
-/// Buffer size has a **major impact** on bulk transfer throughput.
-/// The FunctionFS kernel driver submits one USB transfer per AIO read request.
-/// When the buffer capacity equals the maximum packet size (MPS, typically
-/// 512 bytes for high-speed or 1024 bytes for super-speed), each USB packet
-/// triggers a separate AIO completion — leading to high per-packet overhead
-/// and poor throughput.
-///
-/// Using buffers **much larger** than the MPS (e.g. 16 KiB) allows the kernel
-/// to batch multiple USB packets into a single read, dramatically improving
-/// throughput. A good starting point is a buffer capacity that is a multiple of
-/// the MPS and at least several KiB (e.g. 16 KiB). Use
-/// [`max_packet_size`](Self::max_packet_size) to query the negotiated MPS at
-/// runtime.
-///
-/// For high-throughput workloads, also consider increasing the
-/// [queue depth](EndpointDirection::queue_len) (default: 16).
-///
-/// # Buffer size and zero-length packets (ZLP)
-///
-/// The USB host uses zero-length packets to signal the end of a transfer whose
-/// total size is a multiple of the maximum packet size (MPS). When the receive
-/// buffer capacity equals the MPS, each USB packet completes one read request,
-/// and a ZLP is delivered as a separate zero-length completion.
-///
-/// When the buffer capacity is **larger** than the MPS (recommended for
-/// throughput), the kernel submits a single USB transfer that spans multiple
-/// packets. A short packet — including a ZLP — terminates the transfer early
-/// and the read completes with fewer bytes than the buffer capacity. This is
-/// the standard way to detect end-of-message: any completion where
-/// `received < capacity` indicates that a short packet (or ZLP) arrived.
-///
-/// MPS-sized buffers are only necessary when each individual USB packet must
-/// be observed separately (e.g. for packet-level diagnostics).
+/// [`read_exact`](Self::read_exact) completes only after the caller-provided
+/// slice has been filled. A short AIO read before the slice is full is treated
+/// as a protocol error, not as an end-of-message delimiter.
 #[derive(Debug)]
-pub struct EndpointReceiver(value::Receiver<EndpointIo>);
+pub struct EndpointOut(value::Receiver<EndpointIo>);
 
-impl EndpointReceiver {
+impl EndpointOut {
     /// Gets the endpoint control interface.
-    pub fn control(&'_ mut self) -> Result<EndpointControl<'_>> {
+    pub fn control(&'_ mut self) -> Result<EndpointControl> {
         let io = self.0.get()?;
-        Ok(EndpointControl::new(io, Direction::HostToDevice))
+        Ok(EndpointControl::new(io.file()?, Direction::HostToDevice))
     }
 
     /// Maximum packet size.
@@ -1899,178 +1677,51 @@ impl EndpointReceiver {
         Ok(self.control()?.descriptor()?.max_packet_size.into())
     }
 
-    /// Receive data synchronously.
-    ///
-    /// The buffer should have been allocated with the desired capacity using
-    /// [`BytesMut::with_capacity`]. The capacity should be a positive multiple
-    /// of the endpoint's [maximum packet size](Self::max_packet_size).
-    ///
-    /// Blocks until the operation completes and returns its result.
-    pub fn recv_and_fetch(&mut self, buf: BytesMut) -> Result<BytesMut> {
-        self.try_recv(buf)?;
-        self.fetch()?.ok_or_else(|| Error::other("receive queue unexpectedly empty"))
+    fn chunk_size(&mut self) -> Result<usize> {
+        Ok(exact_aio_chunk_size(self.max_packet_size()?))
     }
 
-    /// Receive data synchronously with a timeout.
+    /// Read exactly enough bytes from the host to fill `data`.
     ///
-    /// The buffer should have been allocated with the desired capacity using
-    /// [`BytesMut::with_capacity`]. The capacity should be a positive multiple
-    /// of the endpoint's [maximum packet size](Self::max_packet_size).
-    ///
-    /// Blocks until the operation completes and returns its result.
-    pub fn recv_and_fetch_timeout(&mut self, buf: BytesMut, timeout: Duration) -> Result<BytesMut> {
-        self.try_recv(buf)?;
-
-        match self.fetch_timeout(timeout) {
-            Ok(Some(data)) => Ok(data),
-            Ok(None) => {
-                self.cancel()?;
-                Err(Error::new(ErrorKind::TimedOut, "timeout waiting for data to be received"))
-            }
-            Err(err) => {
-                self.cancel()?;
-                Err(err)
-            }
-        }
-    }
-
-    /// Receive data.
-    ///
-    /// The buffer should have been allocated with the desired capacity using
-    /// [`BytesMut::with_capacity`]. The capacity should be a positive multiple
-    /// of the endpoint's [maximum packet size](Self::max_packet_size).
-    ///
-    /// Waits for space in the receive queue and enqueues the buffer for receiving data.
-    /// Returns received data, if a buffer in the receive queue was filled.
-    pub fn recv(&mut self, buf: BytesMut) -> Result<Option<BytesMut>> {
-        let data = if self.is_ready() { self.try_fetch()? } else { self.fetch()? };
-        self.try_recv(buf)?;
-        Ok(data)
-    }
-
-    /// Asynchronously receive data.
-    ///
-    /// The buffer should have been allocated with the desired capacity using
-    /// [`BytesMut::with_capacity`]. The capacity should be a positive multiple
-    /// of the endpoint's [maximum packet size](Self::max_packet_size).
-    ///
-    /// Waits for space in the receive queue and enqueues the buffer for receiving data.
-    /// Returns received data, if a buffer in the receive queue was filled.
-    #[cfg(feature = "tokio")]
-    pub async fn recv_async(&mut self, buf: BytesMut) -> Result<Option<BytesMut>> {
-        let data = if self.is_ready() { self.try_fetch()? } else { self.fetch_async().await? };
-        self.try_recv(buf)?;
-        Ok(data)
-    }
-
-    /// Receive data with a timeout.
-    ///
-    /// The buffer should have been allocated with the desired capacity using
-    /// [`BytesMut::with_capacity`]. The capacity should be a positive multiple
-    /// of the endpoint's [maximum packet size](Self::max_packet_size).
-    ///
-    /// Waits for space in the receive queue and enqueues the buffer for receiving data.
-    /// Returns received data, if a buffer in the receive queue was filled.
-    pub fn recv_timeout(&mut self, buf: BytesMut, timeout: Duration) -> Result<Option<BytesMut>> {
-        let data = if self.is_ready() { self.try_fetch()? } else { self.fetch_timeout(timeout)? };
-        if self.is_ready() {
-            self.try_recv(buf)?;
-        }
-        Ok(data)
-    }
-
-    /// Enqueue the buffer for receiving without waiting for receive queue space.
-    ///
-    /// The buffer should have been allocated with the desired capacity using
-    /// [`BytesMut::with_capacity`]. The capacity should be a positive multiple
-    /// of the endpoint's [maximum packet size](Self::max_packet_size).
-    ///
-    /// Fails if no receive queue space is available.
-    pub fn try_recv(&mut self, buf: BytesMut) -> Result<()> {
+    /// If the host sends fewer bytes than `data.len()` (including a ZLP), this
+    /// returns [`ErrorKind::UnexpectedEof`](std::io::ErrorKind::UnexpectedEof)
+    /// and cancels in-flight chunks. Use a sized framing layer if your protocol
+    /// uses short packets as message delimiters.
+    pub fn read_exact(&mut self, data: &mut [u8]) -> Result<()> {
+        let chunk_size = self.chunk_size()?;
         let io = self.0.get()?;
         let file = io.file()?;
-        io.aio.submit(aio::opcode::PREAD, file.as_raw_fd(), buf)?;
-        Ok(())
+        io.aio.read_exact(file.as_raw_fd(), data, chunk_size, None)
     }
 
-    /// Whether receive queue space is available.
+    /// Read exactly enough bytes from the host to fill `data`, timing out while waiting for completion.
     ///
-    /// Receive space will only become available when [`fetch`](Self::fetch),
-    /// [`fetch_timeout`](Self::fetch_timeout) or [`try_fetch`](Self::try_fetch) are called.
-    pub fn is_ready(&mut self) -> bool {
-        let Ok(io) = self.0.get() else { return false };
-        !io.aio.is_full()
-    }
-
-    /// Whether no buffers are enqueued for receiving data.
-    ///
-    /// The receive queue will only be drained when [`fetch`](Self::fetch),
-    /// [`fetch_timeout`](Self::fetch_timeout) or [`try_fetch`](Self::try_fetch) are called.
-    pub fn is_empty(&mut self) -> bool {
-        let Ok(io) = self.0.get() else { return true };
-        io.aio.is_empty()
-    }
-
-    /// Waits for data to be received into a previously enqueued receive buffer, then returns it.
-    ///
-    /// `Ok(None)` is returned if no receive buffers are enqueued.
-    pub fn fetch(&mut self) -> Result<Option<BytesMut>> {
+    /// The timeout applies to the whole logical transfer, not to each internal
+    /// AIO chunk. If the host sends fewer bytes than `data.len()` (including a
+    /// ZLP), this returns
+    /// [`ErrorKind::UnexpectedEof`](std::io::ErrorKind::UnexpectedEof) and
+    /// cancels in-flight chunks.
+    pub fn read_exact_timeout(&mut self, data: &mut [u8], timeout: Duration) -> Result<()> {
+        let chunk_size = self.chunk_size()?;
         let io = self.0.get()?;
-
-        let Some(comp) = io.aio.completed() else {
-            return Ok(None);
-        };
-
-        Ok(Some(into_read_buffer(comp.result()?)?))
+        let file = io.file()?;
+        io.aio.read_exact(file.as_raw_fd(), data, chunk_size, Some(timeout))
     }
 
-    /// Asynchronously waits for data to be received into a previously enqueued receive buffer, then
-    /// returns it.
+    /// Read exactly enough bytes from the host to fill `data` asynchronously.
     ///
-    /// `Ok(None)` is returned if no receive buffers are enqueued.
+    /// If the host sends fewer bytes than `data.len()` (including a ZLP), the
+    /// future resolves to
+    /// [`ErrorKind::UnexpectedEof`](std::io::ErrorKind::UnexpectedEof) and
+    /// cancels in-flight chunks.
+    ///
+    /// Dropping this future cancels and reaps all in-flight AIO chunks
+    /// before releasing the borrow of `data`.
     #[cfg(feature = "tokio")]
-    pub async fn fetch_async(&mut self) -> Result<Option<BytesMut>> {
+    pub async fn read_exact_async(&mut self, data: &mut [u8]) -> Result<()> {
+        let chunk_size = self.chunk_size()?;
         let io = self.0.get()?;
-
-        let Some(comp) = io.aio.wait_completed().await else {
-            return Ok(None);
-        };
-
-        Ok(Some(into_read_buffer(comp.result()?)?))
-    }
-
-    /// Waits for data to be received into a previously enqueued receive buffer with a timeout,
-    /// then returns it.
-    ///
-    /// `Ok(None)` is returned if no receive buffers are enqueued.
-    pub fn fetch_timeout(&mut self, timeout: Duration) -> Result<Option<BytesMut>> {
-        let io = self.0.get()?;
-
-        let Some(comp) = io.aio.completed_timeout(timeout) else {
-            return Ok(None);
-        };
-
-        Ok(Some(into_read_buffer(comp.result()?)?))
-    }
-
-    /// If data has been received into a previously enqueued receive buffer, returns it.
-    ///
-    /// Does not wait for data to be received.
-    pub fn try_fetch(&mut self) -> Result<Option<BytesMut>> {
-        let io = self.0.get()?;
-
-        let Some(comp) = io.aio.try_completed() else { return Ok(None) };
-
-        Ok(Some(into_read_buffer(comp.result()?)?))
-    }
-
-    /// Removes all buffers from the receive queue and clears all errors.
-    pub fn cancel(&mut self) -> Result<()> {
-        let io = self.0.get()?;
-
-        io.aio.cancel_all();
-        while io.aio.completed().is_some() {}
-
-        Ok(())
+        let file = io.file()?;
+        io.aio.read_exact_async(file, data, chunk_size).await
     }
 }

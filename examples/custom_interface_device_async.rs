@@ -1,6 +1,5 @@
 //! Device-side example for USB gadget with custom interface using async IO.
 
-use bytes::BytesMut;
 use std::{
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -66,18 +65,16 @@ async fn main() {
         let size = ep1_rx.max_packet_size().unwrap();
         let mut b = 0;
         while !stop1.load(Ordering::Relaxed) {
-            let data = ep1_rx.recv_async(BytesMut::with_capacity(size)).await.expect("recv_async failed");
-            match data {
-                Some(data) => {
+            let mut data = vec![0; size];
+            match ep1_rx.read_exact_async(&mut data).await {
+                Ok(()) => {
                     println!("received {} bytes: {data:x?}", data.len());
                     if !data.iter().all(|x| *x == b) {
                         panic!("wrong data received");
                     }
                     b = b.wrapping_add(1);
                 }
-                None => {
-                    println!("receive empty");
-                }
+                Err(err) => panic!("read failed: {err}"),
             }
         }
     });
@@ -88,7 +85,7 @@ async fn main() {
         let mut b = 0u8;
         while !stop2.load(Ordering::Relaxed) {
             let data = vec![b; size];
-            match ep2_tx.send_async(data.into()).await {
+            match ep2_tx.write_all_async(&data).await {
                 Ok(()) => {
                     println!("sent data {b} of size {size} bytes");
                     b = b.wrapping_add(1);

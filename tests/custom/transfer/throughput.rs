@@ -6,7 +6,6 @@
 //! In release mode, measured throughput is checked against a minimum floor
 //! that depends on the UDC driver in use (see [`min_throughput_mib_s`]).
 
-use bytes::{Bytes, BytesMut};
 use nusb::transfer::{ControlOut, ControlType, Recipient};
 use std::{
     io::{ErrorKind, Read, Write},
@@ -82,8 +81,8 @@ fn min_throughput_mib_s(driver: &str, max_speed: Speed) -> Option<f64> {
 fn setup_bench_gadget() -> (
     gadgetry_most_foul::RegGadget,
     Custom,
-    gadgetry_most_foul::function::custom::EndpointReceiver,
-    gadgetry_most_foul::function::custom::EndpointSender,
+    gadgetry_most_foul::function::custom::EndpointOut,
+    gadgetry_most_foul::function::custom::EndpointIn,
     String,
     Speed,
 ) {
@@ -122,8 +121,8 @@ fn setup_bench_gadget() -> (
 /// Device side for the throughput benchmark: pipelined send/recv with
 /// pre-allocated buffers for minimal allocation overhead.
 fn run_device_bench(
-    mut custom: Custom, mut ep_rx: gadgetry_most_foul::function::custom::EndpointReceiver,
-    mut ep_tx: gadgetry_most_foul::function::custom::EndpointSender, stop: Arc<AtomicBool>,
+    mut custom: Custom, mut ep_rx: gadgetry_most_foul::function::custom::EndpointOut,
+    mut ep_tx: gadgetry_most_foul::function::custom::EndpointIn, stop: Arc<AtomicBool>,
 ) {
     let stop_rx = stop.clone();
     let stop_tx = stop.clone();
@@ -132,20 +131,16 @@ fn run_device_bench(
         // Receive from host (OUT direction).
         s.spawn(move || {
             let size = BENCH_BUF_SIZE;
-            let mut pool: Vec<BytesMut> = Vec::new();
+            let mut pool: Vec<Vec<u8>> = Vec::new();
             let mut received: usize = 0;
 
             while !stop_rx.load(Ordering::Relaxed) {
-                let buf = pool.pop().unwrap_or_else(|| BytesMut::zeroed(size));
-                match ep_rx.recv_timeout(buf, Duration::from_secs(5)) {
-                    Ok(Some(data)) => {
+                let mut data = pool.pop().unwrap_or_else(|| vec![0; size]);
+                match ep_rx.read_exact_timeout(&mut data, Duration::from_secs(5)) {
+                    Ok(()) => {
                         received += data.len();
-                        let mut recycled = data;
-                        recycled.clear();
-                        recycled.resize(size, 0);
-                        pool.push(recycled);
+                        pool.push(data);
                     }
-                    Ok(None) => {}
                     Err(e) if e.kind() == ErrorKind::TimedOut => {}
                     Err(e) if stop_rx.load(Ordering::Relaxed) => {
                         println!("device bench recv stopped: {e}");
@@ -160,11 +155,11 @@ fn run_device_bench(
         // Send to host (IN direction).
         s.spawn(move || {
             let size = BENCH_BUF_SIZE;
-            let payload: Bytes = vec![0xABu8; size].into();
+            let payload = vec![0xABu8; size];
             let mut sent: usize = 0;
 
             while !stop_tx.load(Ordering::Relaxed) {
-                match ep_tx.send_timeout(payload.clone(), Duration::from_secs(5)) {
+                match ep_tx.write_all_timeout(&payload, Duration::from_secs(5)) {
                     Ok(()) => sent += size,
                     Err(e) if e.kind() == ErrorKind::TimedOut => {}
                     Err(e) if stop_tx.load(Ordering::Relaxed) => {

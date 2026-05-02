@@ -1,41 +1,50 @@
-//! Linux AIO driver.
+//! Linux native AIO driver for exact borrowed-buffer transfers.
 
-use bytes::{Bytes, BytesMut};
 use rustix::event::EventfdFlags;
+use slab::Slab;
 use std::{
-    collections::{hash_map::Entry, HashMap, VecDeque},
+    collections::{HashMap, HashSet},
     fmt,
     io::{Error, ErrorKind, Result},
-    mem::{self, MaybeUninit},
+    mem::MaybeUninit,
     ops::Deref,
-    os::fd::{AsRawFd, OwnedFd, RawFd},
+    os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd, RawFd},
     pin::Pin,
     ptr,
-    sync::{mpsc, mpsc::TryRecvError, Arc},
-    thread,
-    time::Duration,
+    sync::Arc,
+    time::{Duration, Instant},
 };
+
+#[cfg(feature = "tokio")]
+use std::fs::File;
+#[cfg(feature = "tokio")]
+use std::marker::{PhantomData, PhantomPinned};
+#[cfg(feature = "tokio")]
+use std::task::{Context as TaskContext, Poll};
 
 mod sys;
 
 pub use sys::opcode;
+
+const REAP_BATCH: usize = 32;
 
 /// eventfd provided by kernel.
 #[derive(Debug, Clone)]
 struct EventFd(Arc<OwnedFd>);
 
 impl EventFd {
-    /// Create new eventfd with initial value and semaphore characteristics, if requested.
-    pub fn new(initval: u32, semaphore: bool) -> Result<Self> {
-        let flags = if semaphore { EventfdFlags::SEMAPHORE } else { EventfdFlags::empty() };
+    /// Create new nonblocking eventfd with initial value and semaphore characteristics, if requested.
+    fn new(initval: u32, semaphore: bool) -> Result<Self> {
+        let mut flags = EventfdFlags::NONBLOCK;
+        if semaphore {
+            flags |= EventfdFlags::SEMAPHORE;
+        }
         let fd = rustix::event::eventfd(initval, flags)?;
         Ok(Self(Arc::new(fd)))
     }
 
     /// Decrease value by one or set to zero if using semaphore characteristics.
-    ///
-    /// Blocks while value is zero.
-    pub fn read(&self) -> Result<u64> {
+    fn read(&self) -> Result<u64> {
         let mut buf = [0; 8];
         let n = rustix::io::read(&*self.0, &mut buf).map_err(Error::from)?;
         if n != buf.len() {
@@ -45,14 +54,21 @@ impl EventFd {
         Ok(u64::from_ne_bytes(buf))
     }
 
-    /// Increase value by `n`.
-    pub fn write(&self, n: u64) -> Result<()> {
-        let buf = n.to_ne_bytes();
-        let written = rustix::io::write(&*self.0, &buf).map_err(Error::from)?;
-        if written != buf.len() {
-            return Err(Error::other("short write to eventfd"));
+    /// Drain completion notifications already mirrored into the AIO completion queue.
+    fn drain(&self) -> Result<()> {
+        loop {
+            match self.read() {
+                Ok(_) => {}
+                Err(err) if err.kind() == ErrorKind::WouldBlock => return Ok(()),
+                Err(err) => return Err(err),
+            }
         }
-        Ok(())
+    }
+}
+
+impl AsFd for EventFd {
+    fn as_fd(&self) -> BorrowedFd<'_> {
+        self.0.as_fd()
     }
 }
 
@@ -67,8 +83,8 @@ impl AsRawFd for EventFd {
 struct Context(sys::ContextId);
 
 impl Context {
-    /// create an asynchronous I/O context
-    pub fn new(nr_events: u32) -> Result<Self> {
+    /// Create an asynchronous I/O context.
+    fn new(nr_events: u32) -> Result<Self> {
         let mut id = 0;
         unsafe { sys::setup(nr_events, &mut id) }?;
         Ok(Self(id))
@@ -77,7 +93,7 @@ impl Context {
 
 impl Drop for Context {
     fn drop(&mut self) {
-        unsafe { sys::destroy(self.0) }.expect("cannot destory AIO context");
+        let _ = unsafe { sys::destroy(self.0) };
     }
 }
 
@@ -89,457 +105,594 @@ impl Deref for Context {
     }
 }
 
-/// Data buffer for AIO operation.
-#[derive(Debug)]
-pub enum Buffer {
-    /// Initialized buffer for writing data.
-    Write(Bytes),
-    /// Possibly uninitialized buffer for reading data.
-    Read(BytesMut),
-}
-
-impl Buffer {
-    /// Length or capacity of buffer.
-    pub fn size(&self) -> usize {
-        match self {
-            Self::Write(buf) => buf.len(),
-            Self::Read(buf) => buf.capacity(),
-        }
-    }
-
-    /// Get pointer to buffer.
-    ///
-    /// ## Safety
-    /// If this is a write buffer the pointer must only be read from.
-    unsafe fn as_mut_ptr(&mut self) -> *mut u8 {
-        match self {
-            Self::Write(buf) => buf.as_ptr() as *mut _,
-            Self::Read(buf) => buf.as_mut_ptr(),
-        }
-    }
-
-    /// Assume buffer is initialized to given length.
-    unsafe fn assume_init(&mut self, len: usize) {
-        match self {
-            Self::Write(_) => (),
-            Self::Read(buf) => buf.set_len(len),
-        }
-    }
-}
-
-impl From<Bytes> for Buffer {
-    fn from(buf: Bytes) -> Self {
-        Self::Write(buf)
-    }
-}
-
-impl From<BytesMut> for Buffer {
-    fn from(buf: BytesMut) -> Self {
-        Self::Read(buf)
-    }
-}
-
-impl From<Buffer> for Bytes {
-    fn from(buf: Buffer) -> Self {
-        match buf {
-            Buffer::Write(buf) => buf,
-            Buffer::Read(buf) => buf.freeze(),
-        }
-    }
-}
-
-/// Buffer is not a read buffer.
-#[derive(Debug, Clone)]
-pub struct NotAReadBuffer;
-
-impl TryFrom<Buffer> for BytesMut {
-    type Error = NotAReadBuffer;
-    fn try_from(buf: Buffer) -> std::result::Result<Self, NotAReadBuffer> {
-        match buf {
-            Buffer::Write(_) => Err(NotAReadBuffer),
-            Buffer::Read(buf) => Ok(buf),
-        }
-    }
-}
-
-impl Default for Buffer {
-    fn default() -> Self {
-        Self::Write(Bytes::new())
-    }
-}
-
-/// AIO operation.
-struct Op {
-    /// IO control block.
-    pub iocb: Pin<Box<sys::IoCb>>,
-    /// Buffer referenced by [`Self::iocb`].
-    pub buf: Buffer,
-}
-
-impl Default for Op {
-    fn default() -> Self {
-        Self { iocb: Box::pin(Default::default()), buf: Default::default() }
-    }
-}
-
-impl Op {
-    /// Get pointer to IO control block.
-    fn iocb_ptr(&mut self) -> *mut sys::IoCb {
-        Pin::into_inner(self.iocb.as_mut()) as *mut _
-    }
-
-    /// Given received AIO event convert operation to result.
-    fn complete(mut self, event: sys::IoEvent) -> CompletedOp {
-        assert_eq!(event.data, self.iocb.data);
-
-        let result = if event.res >= 0 {
-            let len = usize::try_from(event.res).unwrap_or(usize::MAX);
-            unsafe { self.buf.assume_init(len) };
-            Ok(self.buf)
-        } else {
-            let errno = i32::try_from(-event.res).unwrap_or(i32::MAX);
-            Err(Error::from_raw_os_error(errno))
-        };
-
-        CompletedOp { id: event.data, res: event.res, res2: event.res2, result }
-    }
-}
-
 /// AIO operation handle.
-pub struct OpHandle(u64);
-
-impl OpHandle {
-    /// Operation id.
-    #[allow(dead_code)]
-    pub const fn id(&self) -> u64 {
-        self.0
-    }
-}
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct OpHandle(usize);
 
 /// Completed AIO operation.
 #[derive(Debug)]
-pub struct CompletedOp {
-    id: u64,
+struct CompletedOp {
+    id: usize,
     res: i64,
-    res2: i64,
-    result: Result<Buffer>,
 }
 
 impl CompletedOp {
-    /// Operation id.
-    #[allow(dead_code)]
-    pub const fn id(&self) -> u64 {
-        self.id
-    }
-
-    /// Retrieve result.
-    pub fn result(self) -> Result<Buffer> {
-        self.result
-    }
-
-    /// Result code.
-    #[allow(dead_code)]
-    pub const fn res(&self) -> i64 {
-        self.res
-    }
-
-    /// Result code 2.
-    #[allow(dead_code)]
-    pub const fn res2(&self) -> i64 {
-        self.res2
+    fn result(&self) -> Result<usize> {
+        if self.res >= 0 {
+            Ok(usize::try_from(self.res).unwrap_or(usize::MAX))
+        } else {
+            let errno = i32::try_from(-self.res).unwrap_or(i32::MAX);
+            Err(Error::from_raw_os_error(errno))
+        }
     }
 }
 
-enum Cmd {
-    Insert(Op),
-    Remove(u64),
-    #[allow(dead_code)]
-    Cancel(u64),
-    CancelAll,
+/// Submitted kernel AIO request.
+struct InFlight {
+    iocb: Pin<Box<sys::IoCb>>,
 }
 
-#[cfg(feature = "tokio")]
-type TNotify = Arc<tokio::sync::Notify>;
-#[cfg(not(feature = "tokio"))]
-type TNotify = Arc<()>;
+impl InFlight {
+    fn iocb_ptr(&mut self) -> *mut sys::IoCb {
+        Pin::into_inner(self.iocb.as_mut()) as *mut _
+    }
+}
 
 /// AIO driver.
-///
-/// All outstanding operations are cancelled when this is dropped.
 pub struct Driver {
-    aio: Arc<Context>,
-    cmd_tx: mpsc::Sender<Cmd>,
-    done_rx: mpsc::Receiver<CompletedOp>,
-    next_id: u64,
+    aio: Context,
     eventfd: EventFd,
-    space: u32,
-    queue_length: u32,
+    active: Slab<InFlight>,
+    completed: HashMap<usize, CompletedOp>,
+    queue_len: usize,
     #[cfg(feature = "tokio")]
-    notify: Arc<tokio::sync::Notify>,
+    async_eventfd: Option<tokio::io::unix::AsyncFd<EventFd>>,
 }
 
 impl fmt::Debug for Driver {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         f.debug_struct("Driver")
-            .field("aio", &*self.aio)
-            .field("next_id", &self.next_id)
-            .field("space", &self.space)
-            .field("queue_length", &self.queue_length)
+            .field("aio", &self.aio)
+            .field("active", &self.active.len())
+            .field("completed", &self.completed.len())
+            .field("queue_len", &self.queue_len)
             .finish()
     }
 }
 
 impl Driver {
     /// Create new AIO driver.
-    pub fn new(queue_length: u32, thread_name: Option<String>) -> Result<Self> {
-        let (cmd_tx, cmd_rx) = mpsc::channel();
-        let (done_tx, done_rx) = mpsc::channel();
-
-        let aio = Arc::new(Context::new(queue_length)?);
-        let eventfd = EventFd::new(0, false)?;
-
-        #[cfg(feature = "tokio")]
-        let notify = Arc::new(tokio::sync::Notify::new());
-        #[cfg(not(feature = "tokio"))]
-        let notify = Arc::new(());
-
-        let aio_thread = aio.clone();
-        let eventfd_thread = eventfd.clone();
-        let notify_thread = notify.clone();
-
-        let mut builder = thread::Builder::new();
-        if let Some(thread_name) = thread_name {
-            builder = builder.name(thread_name);
+    pub fn new(queue_len: u32) -> Result<Self> {
+        if queue_len == 0 {
+            return Err(Error::new(ErrorKind::InvalidInput, "AIO queue length must be greater than zero"));
         }
-        builder.spawn(|| Self::thread(aio_thread, eventfd_thread, cmd_rx, done_tx, notify_thread))?;
+
+        let aio = Context::new(queue_len)?;
+        let eventfd = EventFd::new(0, false)?;
 
         Ok(Self {
             aio,
-            cmd_tx,
-            done_rx,
-            next_id: 0,
             eventfd,
-            space: queue_length,
-            queue_length,
+            active: Slab::with_capacity(queue_len as usize),
+            completed: HashMap::new(),
+            queue_len: queue_len as usize,
             #[cfg(feature = "tokio")]
-            notify,
+            async_eventfd: None,
         })
     }
 
-    /// Returns whether the queue of AIO operations is full.
-    pub fn is_full(&self) -> bool {
-        self.space == 0
+    fn available_slots(&self) -> usize {
+        self.queue_len.saturating_sub(self.active.len())
     }
 
-    /// Returns whether the queue of AIO operations is empty.
-    pub fn is_empty(&self) -> bool {
-        self.space == self.queue_length
-    }
-
-    /// Submits an AIO operation.
-    pub fn submit(&mut self, opcode: u16, file: impl AsRawFd, buf: impl Into<Buffer>) -> Result<OpHandle> {
-        if self.is_full() {
+    /// Submit one borrowed-buffer AIO operation.
+    ///
+    /// # Safety
+    /// The caller must keep `buf..buf+nbytes` alive and stable until the returned
+    /// handle is completed, cancelled, or reaped by this driver.
+    unsafe fn submit_raw(&mut self, opcode: u16, fd: RawFd, buf: *mut u8, nbytes: usize) -> Result<OpHandle> {
+        if self.available_slots() == 0 {
             return Err(Error::new(ErrorKind::WouldBlock, "no AIO queue space available"));
         }
 
-        let id = self.next_id;
-        self.next_id = self.next_id.wrapping_add(1);
-
-        let mut buf = buf.into();
+        let nbytes =
+            nbytes.try_into().map_err(|_| Error::new(ErrorKind::InvalidInput, "AIO buffer too large"))?;
+        let entry = self.active.vacant_entry();
+        let id = entry.key();
         let iocb =
-            sys::IoCb::new(opcode, file.as_raw_fd(), unsafe { buf.as_mut_ptr() }, buf.size().try_into().unwrap())
-                .with_resfd(self.eventfd.as_raw_fd())
-                .with_data(id);
-
-        let mut op = Op { iocb: Box::pin(iocb), buf };
+            sys::IoCb::new(opcode, fd, buf, nbytes).with_resfd(self.eventfd.as_raw_fd()).with_data(id as u64);
+        let mut op = InFlight { iocb: Box::pin(iocb) };
         let iocb_ptr = op.iocb_ptr();
-        self.cmd_tx.send(Cmd::Insert(op)).unwrap();
+        entry.insert(op);
 
         let mut iocbs = [iocb_ptr];
-        match unsafe { sys::submit(**self.aio, 1, iocbs.as_mut_ptr()) } {
-            Ok(1) => {
-                self.space -= 1;
-                self.eventfd.write(1).unwrap();
-                Ok(OpHandle(id))
+        match unsafe { sys::submit(*self.aio, 1, iocbs.as_mut_ptr()) } {
+            Ok(1) => Ok(OpHandle(id)),
+            Ok(_) => {
+                self.active.remove(id);
+                Err(Error::new(ErrorKind::WouldBlock, "AIO request not accepted"))
             }
-            res => {
-                self.cmd_tx.send(Cmd::Remove(id)).unwrap();
-                self.eventfd.write(1).unwrap();
-
-                match res {
-                    Ok(_) => Err(Error::new(ErrorKind::WouldBlock, "AIO request not accepted")),
-                    Err(err) => Err(err),
-                }
+            Err(err) => {
+                self.active.remove(id);
+                Err(err)
             }
         }
     }
 
-    /// Retrieves the next operation from the completion queue.
-    ///
-    /// Blocks until a completed operation becomes available.
-    pub fn completed(&mut self) -> Option<CompletedOp> {
-        if self.is_empty() {
-            return None;
+    fn complete_event(&mut self, event: sys::IoEvent) {
+        let Ok(id) = usize::try_from(event.data) else { return };
+        if self.active.contains(id) {
+            self.active.remove(id);
+            self.completed.insert(id, CompletedOp { id, res: event.res });
         }
-
-        let res = self.done_rx.recv().unwrap();
-        self.space += 1;
-        Some(res)
     }
 
-    /// Asynchronously retrieves the next operation from the completion queue.
-    ///
-    /// Waits until a completed operation becomes available.
+    fn reap_with_min(&mut self, min_nr: libc::c_long, timeout: *const libc::timespec) -> Result<usize> {
+        let mut events = [MaybeUninit::<sys::IoEvent>::uninit(); REAP_BATCH];
+        let n = unsafe {
+            sys::getevents(*self.aio, min_nr, events.len() as _, events.as_mut_ptr() as *mut _, timeout)
+        }?;
+
+        let n = usize::try_from(n).unwrap_or(0);
+        for event in events.into_iter().take(n) {
+            self.complete_event(unsafe { event.assume_init() });
+        }
+        Ok(n)
+    }
+
     #[cfg(feature = "tokio")]
-    pub async fn wait_completed(&mut self) -> Option<CompletedOp> {
-        if self.is_empty() {
-            return None;
-        }
-
+    fn reap_nonblocking(&mut self) -> Result<usize> {
+        let mut total = 0;
         loop {
-            if let Some(op) = self.try_completed() {
-                return Some(op);
+            let n = self.reap_with_min(0, ptr::null())?;
+            if n == 0 {
+                break;
             }
-
-            self.notify.notified().await;
+            total += n;
         }
+        Ok(total)
     }
 
-    /// Retrieves the next operation from the completion queue with a timeout.
-    ///
-    /// Blocks until a completed operation becomes available or the timeout is reached.
-    pub fn completed_timeout(&mut self, timeout: Duration) -> Option<CompletedOp> {
-        if self.is_empty() {
-            return None;
+    fn reap_blocking(&mut self) -> Result<usize> {
+        if self.active.is_empty() {
+            return Ok(0);
+        }
+        let n = self.reap_with_min(1, ptr::null())?;
+        self.eventfd.drain()?;
+        Ok(n)
+    }
+
+    fn reap_timeout(&mut self, timeout: Duration) -> Result<usize> {
+        if self.active.is_empty() {
+            return Ok(0);
         }
 
-        let res = self.done_rx.recv_timeout(timeout).ok();
-        if res.is_some() {
-            self.space += 1;
+        let tv_sec =
+            timeout.as_secs().try_into().map_err(|_| Error::new(ErrorKind::InvalidInput, "timeout too large"))?;
+        let tv_nsec = timeout.subsec_nanos().into();
+        let timeout = libc::timespec { tv_sec, tv_nsec };
+        let n = self.reap_with_min(1, &timeout)?;
+        self.eventfd.drain()?;
+        Ok(n)
+    }
+
+    fn cancel_and_reap(&mut self, ids: impl IntoIterator<Item = usize>) -> Result<()> {
+        let mut remaining: HashSet<usize> = ids.into_iter().collect();
+        if remaining.is_empty() {
+            return Ok(());
         }
-        res
-    }
 
-    /// Retrieves the next operation from the completion queue without blocking.
-    ///
-    /// Returns immediately if no completed operation is available.
-    pub fn try_completed(&mut self) -> Option<CompletedOp> {
-        let res = self.done_rx.try_recv().ok();
-        if res.is_some() {
-            self.space += 1;
-        }
-        res
-    }
+        remaining.retain(|id| self.completed.remove(id).is_none());
 
-    /// Requests cancellation of the specified operation.
-    #[allow(dead_code)]
-    pub fn cancel(&mut self, handle: OpHandle) {
-        self.cmd_tx.send(Cmd::Cancel(handle.0)).unwrap();
-        self.eventfd.write(1).unwrap();
-    }
+        let ids_to_cancel: Vec<_> = remaining.iter().copied().collect();
+        for id in ids_to_cancel {
+            let Some(op) = self.active.get_mut(id) else {
+                remaining.remove(&id);
+                continue;
+            };
 
-    /// Requests cancellation of all operations.
-    pub fn cancel_all(&mut self) {
-        self.cmd_tx.send(Cmd::CancelAll).unwrap();
-        self.eventfd.write(1).unwrap();
-    }
-
-    /// Thread managing submitted AIO operations.
-    fn thread(
-        aio: Arc<Context>, eventfd: EventFd, cmd_rx: mpsc::Receiver<Cmd>, done_tx: mpsc::Sender<CompletedOp>,
-        notify: TNotify,
-    ) {
-        #[cfg(not(feature = "tokio"))]
-        let _ = notify;
-
-        let mut active: HashMap<u64, Op> = HashMap::new();
-        let mut event_queue = VecDeque::new();
-
-        'outer: loop {
-            // Wait for event.
-            eventfd.read().unwrap();
-
-            // Process commands.
-            loop {
-                match cmd_rx.try_recv() {
-                    Ok(Cmd::Insert(op)) => {
-                        if active.insert(op.iocb.data, op).is_some() {
-                            panic!("submitted aio request with duplicate id");
-                        }
-                    }
-                    Ok(Cmd::Remove(id)) => {
-                        active.remove(&id).expect("received remove request for unknown id");
-                    }
-                    Ok(Cmd::Cancel(id)) => {
-                        if let Entry::Occupied(mut op) = active.entry(id) {
-                            let mut event = MaybeUninit::<sys::IoEvent>::uninit();
-                            if unsafe {
-                                sys::cancel(**aio, op.get_mut().iocb_ptr(), &mut event as *mut _ as *mut _)
-                            }
-                            .is_ok()
-                            {
-                                let _ = done_tx.send(op.remove().complete(unsafe { event.assume_init() }));
-                                #[cfg(feature = "tokio")]
-                                notify.notify_one();
-                            }
-                        }
-                    }
-                    Ok(Cmd::CancelAll) => {
-                        active.retain(|_id, op| {
-                            let mut event = MaybeUninit::<sys::IoEvent>::uninit();
-                            if unsafe { sys::cancel(**aio, op.iocb_ptr(), &mut event as *mut _ as *mut _) }
-                                .is_ok()
-                            {
-                                let _ = done_tx.send(mem::take(op).complete(unsafe { event.assume_init() }));
-                                #[cfg(feature = "tokio")]
-                                notify.notify_one();
-                                false
-                            } else {
-                                true
-                            }
-                        });
-                    }
-                    Err(TryRecvError::Disconnected) if active.is_empty() => break 'outer,
-                    Err(_) => break,
-                }
+            let mut event = MaybeUninit::<sys::IoEvent>::uninit();
+            if unsafe { sys::cancel(*self.aio, op.iocb_ptr(), event.as_mut_ptr()) }.is_ok() {
+                self.active.remove(id);
+                remaining.remove(&id);
             }
+        }
 
-            // Fetch AIO events.
-            loop {
-                let mut events = [MaybeUninit::<sys::IoEvent>::uninit(); 16];
+        while !remaining.is_empty() {
+            self.reap_blocking()?;
+            remaining.retain(|id| self.completed.remove(id).is_none());
+            remaining.retain(|id| self.active.contains(*id));
+        }
 
-                let n = unsafe {
-                    sys::getevents(**aio, 0, events.len() as _, events.as_mut_ptr() as *mut _, ptr::null())
-                }
-                .expect("io_getevents failed");
+        Ok(())
+    }
 
-                if n == 0 {
-                    break;
-                }
+    #[cfg(feature = "tokio")]
+    fn poll_reap(&mut self, cx: &mut TaskContext<'_>) -> Poll<Result<()>> {
+        match self.reap_nonblocking() {
+            Ok(0) => {}
+            Ok(_) => return Poll::Ready(Ok(())),
+            Err(err) => return Poll::Ready(Err(err)),
+        }
 
-                for event in events.into_iter().take(n.try_into().unwrap()) {
-                    let event = unsafe { event.assume_init() };
-                    event_queue.push_back(event);
-                }
+        if self.async_eventfd.is_none() {
+            match tokio::io::unix::AsyncFd::with_interest(self.eventfd.clone(), tokio::io::Interest::READABLE) {
+                Ok(async_eventfd) => self.async_eventfd = Some(async_eventfd),
+                Err(err) => return Poll::Ready(Err(err)),
             }
+        }
 
-            // Process AIO events.
-            while let Some(event) = event_queue.front() {
-                match active.remove(&event.data) {
-                    Some(op) => {
-                        let _ = done_tx.send(op.complete(event_queue.pop_front().unwrap()));
-                        #[cfg(feature = "tokio")]
-                        notify.notify_one();
-                    }
-                    None => break,
+        let async_eventfd = self.async_eventfd.as_mut().expect("async eventfd initialized");
+        match async_eventfd.poll_read_ready(cx) {
+            Poll::Ready(Ok(mut guard)) => {
+                let read_res = guard.try_io(|async_fd| async_fd.get_ref().read().map(|_| ()));
+                drop(guard);
+
+                match read_res {
+                    Ok(Ok(())) => {}
+                    Ok(Err(err)) => return Poll::Ready(Err(err)),
+                    Err(_) => {}
+                }
+
+                Poll::Ready(self.reap_nonblocking().map(|_| ()))
+            }
+            Poll::Ready(Err(err)) => Poll::Ready(Err(err)),
+            Poll::Pending => {
+                // The eventfd is only a wakeup hint; the AIO completion queue is
+                // authoritative. Check it again after registering the waker so a
+                // completion racing with readiness registration cannot sleep
+                // until an unrelated later eventfd notification.
+                match self.reap_nonblocking() {
+                    Ok(0) => Poll::Pending,
+                    Ok(_) => Poll::Ready(Ok(())),
+                    Err(err) => Poll::Ready(Err(err)),
                 }
             }
         }
+    }
+
+    /// Execute a blocking exact read into a borrowed buffer.
+    pub fn read_exact(
+        &mut self, fd: RawFd, buf: &mut [u8], chunk_size: usize, timeout: Option<Duration>,
+    ) -> Result<()> {
+        let mut state = ExactState::new(TransferKind::Read, fd, buf.as_mut_ptr(), buf.len(), chunk_size);
+        state.run_blocking(self, timeout)
+    }
+
+    /// Execute a blocking exact write from a borrowed buffer.
+    pub fn write_all(
+        &mut self, fd: RawFd, buf: &[u8], chunk_size: usize, timeout: Option<Duration>,
+    ) -> Result<()> {
+        let mut state = ExactState::new(TransferKind::Write, fd, buf.as_ptr() as *mut u8, buf.len(), chunk_size);
+        state.run_blocking(self, timeout)
+    }
+
+    /// Create an async exact read future.
+    #[cfg(feature = "tokio")]
+    pub fn read_exact_async<'a>(
+        &'a mut self, file: Arc<File>, buf: &'a mut [u8], chunk_size: usize,
+    ) -> ReadExact<'a> {
+        let fd = file.as_raw_fd();
+        ReadExact::new(
+            self,
+            file,
+            ExactState::new(TransferKind::Read, fd, buf.as_mut_ptr(), buf.len(), chunk_size),
+        )
+    }
+
+    /// Create an async exact write future.
+    #[cfg(feature = "tokio")]
+    pub fn write_all_async<'a>(&'a mut self, file: Arc<File>, buf: &'a [u8], chunk_size: usize) -> WriteAll<'a> {
+        let fd = file.as_raw_fd();
+        WriteAll::new(
+            self,
+            file,
+            ExactState::new(TransferKind::Write, fd, buf.as_ptr() as *mut u8, buf.len(), chunk_size),
+        )
     }
 }
 
 impl Drop for Driver {
     fn drop(&mut self) {
-        self.cancel_all();
+        let ids: Vec<_> = self.active.iter().map(|(id, _)| id).collect();
+        let _ = self.cancel_and_reap(ids);
     }
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TransferKind {
+    Read,
+    Write,
+}
+
+impl TransferKind {
+    fn opcode(self) -> u16 {
+        match self {
+            Self::Read => opcode::PREAD,
+            Self::Write => opcode::PWRITE,
+        }
+    }
+
+    fn short_error(self, expected: usize, actual: usize) -> Error {
+        match self {
+            Self::Read => Error::new(
+                ErrorKind::UnexpectedEof,
+                format!("short AIO read: expected {expected} bytes, received {actual}"),
+            ),
+            Self::Write => Error::new(
+                ErrorKind::WriteZero,
+                format!("short AIO write: expected {expected} bytes, wrote {actual}"),
+            ),
+        }
+    }
+}
+
+#[derive(Debug)]
+struct PendingChunk {
+    len: usize,
+}
+
+#[derive(Debug)]
+struct ExactState {
+    kind: TransferKind,
+    fd: RawFd,
+    ptr: *mut u8,
+    total_len: usize,
+    chunk_size: usize,
+    submitted: usize,
+    completed: usize,
+    submitted_zero: bool,
+    pending: HashMap<usize, PendingChunk>,
+}
+
+impl ExactState {
+    fn new(kind: TransferKind, fd: RawFd, ptr: *mut u8, total_len: usize, chunk_size: usize) -> Self {
+        Self {
+            kind,
+            fd,
+            ptr,
+            total_len,
+            chunk_size: chunk_size.max(1),
+            submitted: 0,
+            completed: 0,
+            submitted_zero: false,
+            pending: HashMap::new(),
+        }
+    }
+
+    fn is_done(&self) -> bool {
+        if !self.pending.is_empty() {
+            return false;
+        }
+
+        match self.kind {
+            TransferKind::Read => self.completed == self.total_len,
+            TransferKind::Write if self.total_len == 0 => self.submitted_zero,
+            TransferKind::Write => self.completed == self.total_len,
+        }
+    }
+
+    fn submit_available(&mut self, driver: &mut Driver) -> Result<()> {
+        if self.kind == TransferKind::Write && self.total_len == 0 && !self.submitted_zero {
+            if driver.available_slots() == 0 {
+                return Ok(());
+            }
+            let handle = unsafe { driver.submit_raw(self.kind.opcode(), self.fd, self.ptr, 0)? };
+            self.pending.insert(handle.0, PendingChunk { len: 0 });
+            self.submitted_zero = true;
+            return Ok(());
+        }
+
+        while self.submitted < self.total_len && driver.available_slots() > 0 {
+            let remaining = self.total_len - self.submitted;
+            let len = remaining.min(self.chunk_size);
+            let ptr = unsafe { self.ptr.add(self.submitted) };
+            let handle = unsafe { driver.submit_raw(self.kind.opcode(), self.fd, ptr, len)? };
+            self.pending.insert(handle.0, PendingChunk { len });
+            self.submitted += len;
+        }
+
+        Ok(())
+    }
+
+    fn consume_completed(&mut self, driver: &mut Driver) -> Result<()> {
+        while let Some(id) = self.pending.keys().find(|id| driver.completed.contains_key(id)).copied() {
+            let comp = driver.completed.remove(&id).expect("completed exact AIO chunk disappeared");
+            debug_assert_eq!(comp.id, id);
+            let chunk = self.pending.remove(&id).expect("completed unknown exact AIO chunk");
+            let actual = comp.result()?;
+            if actual != chunk.len {
+                return Err(self.kind.short_error(chunk.len, actual));
+            }
+            self.completed += actual;
+        }
+
+        Ok(())
+    }
+
+    fn cancel_blocking(&mut self, driver: &mut Driver) -> Result<()> {
+        let ids: Vec<_> = self.pending.keys().copied().collect();
+        driver.cancel_and_reap(ids)?;
+        self.pending.clear();
+        Ok(())
+    }
+
+    fn run_blocking(&mut self, driver: &mut Driver, timeout: Option<Duration>) -> Result<()> {
+        let deadline = timeout
+            .map(|timeout| {
+                Instant::now()
+                    .checked_add(timeout)
+                    .ok_or_else(|| Error::new(ErrorKind::InvalidInput, "timeout too large"))
+            })
+            .transpose()?;
+
+        let res = loop {
+            if let Err(err) = self.consume_completed(driver) {
+                break Err(err);
+            }
+            if self.is_done() {
+                break Ok(());
+            }
+
+            if let Err(err) = self.submit_available(driver) {
+                break Err(err);
+            }
+            if let Err(err) = self.consume_completed(driver) {
+                break Err(err);
+            }
+            if self.is_done() {
+                break Ok(());
+            }
+
+            let reaped = match deadline {
+                Some(deadline) => {
+                    let remaining = deadline.checked_duration_since(Instant::now()).unwrap_or_default();
+                    if remaining.is_zero() {
+                        break Err(Error::new(ErrorKind::TimedOut, "timeout waiting for exact AIO transfer"));
+                    }
+                    driver.reap_timeout(remaining)
+                }
+                None => driver.reap_blocking(),
+            };
+
+            match reaped {
+                Ok(0) => break Err(Error::new(ErrorKind::TimedOut, "timeout waiting for exact AIO transfer")),
+                Ok(_) => {}
+                Err(err) => break Err(err),
+            }
+        };
+
+        if res.is_err() {
+            let _ = self.cancel_blocking(driver);
+        }
+        res
+    }
+}
+
+#[cfg(feature = "tokio")]
+fn poll_exact(
+    driver: &mut Driver, state: &mut ExactState, done: &mut bool, cx: &mut TaskContext<'_>,
+) -> Poll<Result<()>> {
+    if *done {
+        return Poll::Ready(Ok(()));
+    }
+
+    loop {
+        if let Err(err) = state.consume_completed(driver) {
+            let _ = state.cancel_blocking(driver);
+            *done = true;
+            return Poll::Ready(Err(err));
+        }
+        if state.is_done() {
+            *done = true;
+            return Poll::Ready(Ok(()));
+        }
+
+        if let Err(err) = state.submit_available(driver) {
+            let _ = state.cancel_blocking(driver);
+            *done = true;
+            return Poll::Ready(Err(err));
+        }
+        if let Err(err) = state.consume_completed(driver) {
+            let _ = state.cancel_blocking(driver);
+            *done = true;
+            return Poll::Ready(Err(err));
+        }
+        if state.is_done() {
+            *done = true;
+            return Poll::Ready(Ok(()));
+        }
+
+        match driver.poll_reap(cx) {
+            Poll::Ready(Ok(())) => continue,
+            Poll::Ready(Err(err)) => {
+                let _ = state.cancel_blocking(driver);
+                *done = true;
+                return Poll::Ready(Err(err));
+            }
+            Poll::Pending => return Poll::Pending,
+        }
+    }
+}
+
+/// Async exact read future.
+#[cfg(feature = "tokio")]
+pub struct ReadExact<'a> {
+    driver: &'a mut Driver,
+    _file: Arc<File>,
+    state: ExactState,
+    done: bool,
+    _borrow: PhantomData<&'a mut [u8]>,
+    _pin: PhantomPinned,
+}
+
+#[cfg(feature = "tokio")]
+impl<'a> ReadExact<'a> {
+    fn new(driver: &'a mut Driver, file: Arc<File>, state: ExactState) -> Self {
+        Self { driver, _file: file, state, done: false, _borrow: PhantomData, _pin: PhantomPinned }
+    }
+}
+
+#[cfg(feature = "tokio")]
+impl std::future::Future for ReadExact<'_> {
+    type Output = Result<()>;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<Self::Output> {
+        let this = unsafe { self.get_unchecked_mut() };
+        poll_exact(this.driver, &mut this.state, &mut this.done, cx)
+    }
+}
+
+#[cfg(feature = "tokio")]
+impl Drop for ReadExact<'_> {
+    fn drop(&mut self) {
+        if !self.done {
+            let _ = self.state.cancel_blocking(self.driver);
+            self.done = true;
+        }
+    }
+}
+
+#[cfg(feature = "tokio")]
+unsafe impl Send for ReadExact<'_> {}
+
+/// Async exact write future.
+#[cfg(feature = "tokio")]
+pub struct WriteAll<'a> {
+    driver: &'a mut Driver,
+    _file: Arc<File>,
+    state: ExactState,
+    done: bool,
+    _borrow: PhantomData<&'a [u8]>,
+    _pin: PhantomPinned,
+}
+
+#[cfg(feature = "tokio")]
+impl<'a> WriteAll<'a> {
+    fn new(driver: &'a mut Driver, file: Arc<File>, state: ExactState) -> Self {
+        Self { driver, _file: file, state, done: false, _borrow: PhantomData, _pin: PhantomPinned }
+    }
+}
+
+#[cfg(feature = "tokio")]
+impl std::future::Future for WriteAll<'_> {
+    type Output = Result<()>;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<Self::Output> {
+        let this = unsafe { self.get_unchecked_mut() };
+        poll_exact(this.driver, &mut this.state, &mut this.done, cx)
+    }
+}
+
+#[cfg(feature = "tokio")]
+impl Drop for WriteAll<'_> {
+    fn drop(&mut self) {
+        if !self.done {
+            let _ = self.state.cancel_blocking(self.driver);
+            self.done = true;
+        }
+    }
+}
+
+#[cfg(feature = "tokio")]
+unsafe impl Send for WriteAll<'_> {}

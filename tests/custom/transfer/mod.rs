@@ -51,8 +51,8 @@ fn setup_gadget_with_id(
 ) -> (
     gadgetry_most_foul::RegGadget,
     Custom,
-    gadgetry_most_foul::function::custom::EndpointReceiver,
-    gadgetry_most_foul::function::custom::EndpointSender,
+    gadgetry_most_foul::function::custom::EndpointOut,
+    gadgetry_most_foul::function::custom::EndpointIn,
 ) {
     let (ep_rx, ep_rx_dir) = EndpointDirection::host_to_device();
     let (ep_tx, ep_tx_dir) = EndpointDirection::device_to_host();
@@ -158,10 +158,8 @@ fn run_device_events(custom: &mut Custom, stop: &AtomicBool, handle_ctrl: bool) 
                     }
                     ctrl_data = req.recv_all().unwrap();
                 }
-                Event::SetupDeviceToHost(req) => {
-                    if req.ctrl_req().request == req::ECHO {
-                        req.send(&ctrl_data).unwrap();
-                    }
+                Event::SetupDeviceToHost(req) if req.ctrl_req().request == req::ECHO => {
+                    req.send(&ctrl_data).unwrap();
                 }
                 _ => {}
             },

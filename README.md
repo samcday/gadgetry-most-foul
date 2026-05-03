@@ -32,57 +32,11 @@ In addition fully custom USB functions can be implemented in user-mode Rust code
 
 Support for OS-specific descriptors and WebUSB is also provided.
 
-CLI tool
---------
-
-The `gadgetry-most-foul` CLI tool allows you to configure USB gadgets from TOML configuration
-files without writing any Rust code.
-
-### Installation
-
-    cargo install gadgetry-most-foul --features cli
-
-### Usage
-
-Create a TOML configuration file describing your gadget, then use the CLI to manage it:
-
-    gadgetry-most-foul up gadget.toml       # register and bind a gadget
-    gadgetry-most-foul list                 # list registered gadgets
-    gadgetry-most-foul down my-gadget       # remove a gadget by name
-    gadgetry-most-foul down --all           # remove all gadgets
-    gadgetry-most-foul check gadget.toml    # validate a config file
-
-You can also pass a directory to `up` or `check` to process all `.toml` files in it.
-
-### Example configuration
-
-```toml
-name = "serial-debug"
-
-[device]
-vendor = 0x1209
-product = 0x0002
-manufacturer = "Example Inc."
-product_name = "Debug Console"
-serial = "0001"
-
-[[config]]
-description = "Serial Config"
-
-[[config.function]]
-type = "serial"
-class = "acm"
-```
-
-Multiple functions can be combined in a single gadget by adding more `[[config.function]]`
-entries. Run `gadgetry-most-foul template --list` to see all available templates.
-
 Features
 --------
 
 This crate provides the following optional features:
 
-* `cli`: builds the `gadgetry-most-foul` CLI tool for configuring gadgets from TOML files.
 * `tokio`: enables async support for custom USB functions on top of the Tokio runtime.
 
 Requirements

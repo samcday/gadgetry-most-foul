@@ -1151,21 +1151,6 @@ impl Custom {
         Ok(fds[0].revents().contains(PollFlags::IN))
     }
 
-    /// Asynchronously wait for an event to be available.
-    #[cfg(feature = "tokio")]
-    pub async fn wait_event(&mut self) -> Result<()> {
-        use std::os::fd::AsFd;
-        use tokio::io::{unix::AsyncFd, Interest};
-
-        let ep0 = self.ep0()?;
-
-        let async_fd = AsyncFd::with_interest(ep0.as_fd(), Interest::READABLE)?;
-        let mut guard = async_fd.readable().await?;
-        guard.clear_ready();
-
-        Ok(())
-    }
-
     /// Returns whether events are available for processing.
     pub fn has_event(&mut self) -> bool {
         self.wait_event_sync(Some(Duration::ZERO)).unwrap_or_default()
@@ -1648,7 +1633,6 @@ impl EndpointIn {
     ///
     /// Dropping this future cancels and reaps all in-flight AIO chunks
     /// before releasing the borrow of `data`.
-    #[cfg(feature = "tokio")]
     pub async fn write_all_async(&mut self, data: &[u8]) -> Result<()> {
         let chunk_size = self.chunk_size()?;
         let io = self.0.get()?;
@@ -1717,7 +1701,6 @@ impl EndpointOut {
     ///
     /// Dropping this future cancels and reaps all in-flight AIO chunks
     /// before releasing the borrow of `data`.
-    #[cfg(feature = "tokio")]
     pub async fn read_exact_async(&mut self, data: &mut [u8]) -> Result<()> {
         let chunk_size = self.chunk_size()?;
         let io = self.0.get()?;

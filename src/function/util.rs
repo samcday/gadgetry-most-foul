@@ -63,34 +63,6 @@ impl Status {
         }
     }
 
-    /// Waits for the function to be bound to a UDC.
-    ///
-    /// Returns with a broken pipe error if gadget is removed.
-    #[cfg(feature = "tokio")]
-    pub async fn bound(&self) -> Result<()> {
-        loop {
-            let notifier = self.0.notify.notified();
-            match self.state() {
-                State::Bound => return Ok(()),
-                State::Removed => return Err(Error::new(ErrorKind::BrokenPipe, "gadget was removed")),
-                _ => (),
-            }
-            notifier.await;
-        }
-    }
-
-    /// Waits for the function to be unbound from a UDC.
-    #[cfg(feature = "tokio")]
-    pub async fn unbound(&self) {
-        loop {
-            let notifier = self.0.notify.notified();
-            if self.state() != State::Bound {
-                return;
-            }
-            notifier.await;
-        }
-    }
-
     /// The USB gadget function directory in configfs, if registered.
     pub fn path(&self) -> Option<PathBuf> {
         self.0.inner.lock().unwrap().dir.clone()
@@ -103,8 +75,6 @@ impl Status {
 #[derive(Clone)]
 pub struct FunctionDir {
     inner: Arc<Mutex<FunctionDirInner>>,
-    #[cfg(feature = "tokio")]
-    notify: Arc<tokio::sync::Notify>,
 }
 
 #[derive(Debug, Default)]
@@ -129,34 +99,21 @@ impl Default for FunctionDir {
 impl FunctionDir {
     /// Creates an empty function directory container.
     pub fn new() -> Self {
-        Self {
-            inner: Arc::new(Mutex::new(FunctionDirInner::default())),
-            #[cfg(feature = "tokio")]
-            notify: Arc::new(tokio::sync::Notify::new()),
-        }
+        Self { inner: Arc::new(Mutex::new(FunctionDirInner::default())) }
     }
 
     pub(crate) fn set_dir(&self, function_dir: &Path) {
         let mut inner = self.inner.lock().unwrap();
         inner.dir = Some(function_dir.to_path_buf());
         inner.dir_was_set = true;
-
-        #[cfg(feature = "tokio")]
-        self.notify.notify_waiters();
     }
 
     pub(crate) fn reset_dir(&self) {
         self.inner.lock().unwrap().dir = None;
-
-        #[cfg(feature = "tokio")]
-        self.notify.notify_waiters();
     }
 
     pub(crate) fn set_bound(&self, bound: bool) {
         self.inner.lock().unwrap().bound = bound;
-
-        #[cfg(feature = "tokio")]
-        self.notify.notify_waiters();
     }
 
     /// Create status accessor.

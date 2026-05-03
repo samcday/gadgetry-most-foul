@@ -14,8 +14,11 @@ edition = "2021"
 default = []
 
 [dependencies]
+async-io = "2"
 bitflags = "2.4"
 byteorder = "1"
+futures = { version = "0.3", default-features = false, features = ["std"] }
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
 libc = "0.2"
 log = "0.4"
 macaddr = "1.0"
@@ -23,7 +26,6 @@ rustix = { version = "1", features = ["fs", "mount", "event", "system", "time"] 
 proc-mounts = "0.3"
 slab = "0.4"
 strum = { version = "0.28", features = ["derive"] }
-tokio = { version = "1.32", features = ["net", "rt", "sync"], optional = true }
 uuid = "1"
 
 [dev-dependencies]
@@ -33,11 +35,10 @@ env_logger = "0.11"
 nusb = "0.2"
 serial_test = "3"
 tempfile = "3"
-tokio = { version = "1", features = ["macros", "time"] }
+tokio = { version = "1", features = ["macros", "net", "rt", "sync", "time"] }
 
 [[example]]
 name = "custom_interface_device_async"
-required-features = ["tokio"]
 doc-scrape-examples = true
 
 [package.metadata.docs.rs]

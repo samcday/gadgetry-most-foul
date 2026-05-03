@@ -16,6 +16,7 @@ async fn run_device_async(
     mut custom: Custom, mut ep_rx: gadgetry_most_foul::function::custom::EndpointOut,
     mut ep_tx: gadgetry_most_foul::function::custom::EndpointIn,
 ) {
+    use tokio::io::{unix::AsyncFd, Interest};
     use tokio::sync::Notify;
 
     let stop = Arc::new(Notify::new());
@@ -73,14 +74,19 @@ async fn run_device_async(
     });
 
     // Event loop: handle control requests.
+    let event_fd = AsyncFd::with_interest(custom.fd().expect("device event fd failed"), Interest::READABLE)
+        .expect("device event fd registration failed");
     let mut ctrl_data = Vec::new();
     let mut stopped = false;
     while !stopped {
-        if custom.wait_event().await.is_err() {
+        let Ok(mut guard) = event_fd.readable().await else {
             break;
-        }
-        match custom.event() {
-            Ok(event) => match event {
+        };
+        guard.clear_ready();
+        drop(guard);
+
+        match custom.try_event() {
+            Ok(Some(event)) => match event {
                 Event::SetupHostToDevice(req) => {
                     if req.ctrl_req().request == req::STOP {
                         stopped = true;
@@ -92,6 +98,7 @@ async fn run_device_async(
                 }
                 _ => {}
             },
+            Ok(None) => continue,
             Err(e) => {
                 if !stopped {
                     panic!("device async event error: {e}");

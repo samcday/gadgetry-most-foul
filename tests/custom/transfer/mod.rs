@@ -12,7 +12,6 @@ mod pipelined;
 mod sync;
 mod throughput;
 
-#[cfg(feature = "tokio")]
 mod async_io;
 
 use nusb::{

@@ -1,26 +1,23 @@
 //! Linux native AIO driver for exact borrowed-buffer transfers.
 
+use async_io::Async;
 use rustix::event::EventfdFlags;
 use slab::Slab;
 use std::{
     collections::{HashMap, HashSet},
     fmt,
+    fs::File,
     io::{Error, ErrorKind, Result},
+    marker::{PhantomData, PhantomPinned},
     mem::MaybeUninit,
     ops::Deref,
     os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd, RawFd},
     pin::Pin,
     ptr,
     sync::Arc,
+    task::{Context as TaskContext, Poll},
     time::{Duration, Instant},
 };
-
-#[cfg(feature = "tokio")]
-use std::fs::File;
-#[cfg(feature = "tokio")]
-use std::marker::{PhantomData, PhantomPinned};
-#[cfg(feature = "tokio")]
-use std::task::{Context as TaskContext, Poll};
 
 mod sys;
 
@@ -145,8 +142,7 @@ pub struct Driver {
     active: Slab<InFlight>,
     completed: HashMap<usize, CompletedOp>,
     queue_len: usize,
-    #[cfg(feature = "tokio")]
-    async_eventfd: Option<tokio::io::unix::AsyncFd<EventFd>>,
+    async_eventfd: Option<Async<EventFd>>,
 }
 
 impl fmt::Debug for Driver {
@@ -176,7 +172,6 @@ impl Driver {
             active: Slab::with_capacity(queue_len as usize),
             completed: HashMap::new(),
             queue_len: queue_len as usize,
-            #[cfg(feature = "tokio")]
             async_eventfd: None,
         })
     }
@@ -240,7 +235,6 @@ impl Driver {
         Ok(n)
     }
 
-    #[cfg(feature = "tokio")]
     fn reap_nonblocking(&mut self) -> Result<usize> {
         let mut total = 0;
         loop {
@@ -307,7 +301,6 @@ impl Driver {
         Ok(())
     }
 
-    #[cfg(feature = "tokio")]
     fn poll_reap(&mut self, cx: &mut TaskContext<'_>) -> Poll<Result<()>> {
         match self.reap_nonblocking() {
             Ok(0) => {}
@@ -316,22 +309,17 @@ impl Driver {
         }
 
         if self.async_eventfd.is_none() {
-            match tokio::io::unix::AsyncFd::with_interest(self.eventfd.clone(), tokio::io::Interest::READABLE) {
+            match Async::new_nonblocking(self.eventfd.clone()) {
                 Ok(async_eventfd) => self.async_eventfd = Some(async_eventfd),
                 Err(err) => return Poll::Ready(Err(err)),
             }
         }
 
-        let async_eventfd = self.async_eventfd.as_mut().expect("async eventfd initialized");
-        match async_eventfd.poll_read_ready(cx) {
-            Poll::Ready(Ok(mut guard)) => {
-                let read_res = guard.try_io(|async_fd| async_fd.get_ref().read().map(|_| ()));
-                drop(guard);
-
-                match read_res {
-                    Ok(Ok(())) => {}
-                    Ok(Err(err)) => return Poll::Ready(Err(err)),
-                    Err(_) => {}
+        let async_eventfd = self.async_eventfd.as_ref().expect("async eventfd initialized");
+        match async_eventfd.poll_readable(cx) {
+            Poll::Ready(Ok(())) => {
+                if let Err(err) = self.eventfd.drain() {
+                    return Poll::Ready(Err(err));
                 }
 
                 Poll::Ready(self.reap_nonblocking().map(|_| ()))
@@ -368,7 +356,6 @@ impl Driver {
     }
 
     /// Create an async exact read future.
-    #[cfg(feature = "tokio")]
     pub fn read_exact_async<'a>(
         &'a mut self, file: Arc<File>, buf: &'a mut [u8], chunk_size: usize,
     ) -> ReadExact<'a> {
@@ -381,7 +368,6 @@ impl Driver {
     }
 
     /// Create an async exact write future.
-    #[cfg(feature = "tokio")]
     pub fn write_all_async<'a>(&'a mut self, file: Arc<File>, buf: &'a [u8], chunk_size: usize) -> WriteAll<'a> {
         let fd = file.as_raw_fd();
         WriteAll::new(
@@ -569,7 +555,6 @@ impl ExactState {
     }
 }
 
-#[cfg(feature = "tokio")]
 fn poll_exact(
     driver: &mut Driver, state: &mut ExactState, done: &mut bool, cx: &mut TaskContext<'_>,
 ) -> Poll<Result<()>> {
@@ -616,7 +601,6 @@ fn poll_exact(
 }
 
 /// Async exact read future.
-#[cfg(feature = "tokio")]
 pub struct ReadExact<'a> {
     driver: &'a mut Driver,
     _file: Arc<File>,
@@ -626,15 +610,13 @@ pub struct ReadExact<'a> {
     _pin: PhantomPinned,
 }
 
-#[cfg(feature = "tokio")]
 impl<'a> ReadExact<'a> {
     fn new(driver: &'a mut Driver, file: Arc<File>, state: ExactState) -> Self {
         Self { driver, _file: file, state, done: false, _borrow: PhantomData, _pin: PhantomPinned }
     }
 }
 
-#[cfg(feature = "tokio")]
-impl std::future::Future for ReadExact<'_> {
+impl futures::Future for ReadExact<'_> {
     type Output = Result<()>;
 
     fn poll(self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<Self::Output> {
@@ -643,7 +625,12 @@ impl std::future::Future for ReadExact<'_> {
     }
 }
 
-#[cfg(feature = "tokio")]
+impl futures_util::future::FusedFuture for ReadExact<'_> {
+    fn is_terminated(&self) -> bool {
+        self.done
+    }
+}
+
 impl Drop for ReadExact<'_> {
     fn drop(&mut self) {
         if !self.done {
@@ -653,11 +640,9 @@ impl Drop for ReadExact<'_> {
     }
 }
 
-#[cfg(feature = "tokio")]
 unsafe impl Send for ReadExact<'_> {}
 
 /// Async exact write future.
-#[cfg(feature = "tokio")]
 pub struct WriteAll<'a> {
     driver: &'a mut Driver,
     _file: Arc<File>,
@@ -667,15 +652,13 @@ pub struct WriteAll<'a> {
     _pin: PhantomPinned,
 }
 
-#[cfg(feature = "tokio")]
 impl<'a> WriteAll<'a> {
     fn new(driver: &'a mut Driver, file: Arc<File>, state: ExactState) -> Self {
         Self { driver, _file: file, state, done: false, _borrow: PhantomData, _pin: PhantomPinned }
     }
 }
 
-#[cfg(feature = "tokio")]
-impl std::future::Future for WriteAll<'_> {
+impl futures::Future for WriteAll<'_> {
     type Output = Result<()>;
 
     fn poll(self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<Self::Output> {
@@ -684,7 +667,12 @@ impl std::future::Future for WriteAll<'_> {
     }
 }
 
-#[cfg(feature = "tokio")]
+impl futures_util::future::FusedFuture for WriteAll<'_> {
+    fn is_terminated(&self) -> bool {
+        self.done
+    }
+}
+
 impl Drop for WriteAll<'_> {
     fn drop(&mut self) {
         if !self.done {
@@ -694,5 +682,4 @@ impl Drop for WriteAll<'_> {
     }
 }
 
-#[cfg(feature = "tokio")]
 unsafe impl Send for WriteAll<'_> {}

@@ -95,11 +95,18 @@ async fn main() {
         }
     });
 
+    let event_fd = tokio::io::unix::AsyncFd::with_interest(
+        custom.fd().expect("event fd failed"),
+        tokio::io::Interest::READABLE,
+    )
+    .expect("event fd registration failed");
     let mut ctrl_data = Vec::new();
     while !stop.load(Ordering::Relaxed) {
-        custom.wait_event().await.expect("wait for event failed");
+        let mut guard = event_fd.readable().await.expect("wait for event failed");
+        guard.clear_ready();
+        drop(guard);
         println!("event ready");
-        let event = custom.event().expect("event failed");
+        let Some(event) = custom.try_event().expect("event failed") else { continue };
 
         println!("Event: {event:?}");
         match event {

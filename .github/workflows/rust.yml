@@ -22,5 +22,3 @@ jobs:
       run: cargo fmt --check
     - name: Build
       run: cargo build --quiet --all-targets
-    - name: Build with Tokio support
-      run: cargo build --quiet --features tokio --all-targets

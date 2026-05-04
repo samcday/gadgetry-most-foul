@@ -11,8 +11,11 @@ pub mod other;
 pub mod printer;
 pub mod serial;
 pub mod sourcesink;
-pub mod util;
 pub mod video;
+
+pub(crate) mod util;
+
+pub use util::{State, Status};
 
 use std::{cmp, hash, hash::Hash, sync::Arc};
 

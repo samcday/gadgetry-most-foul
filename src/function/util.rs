@@ -131,14 +131,6 @@ impl FunctionDir {
             .ok_or_else(|| Error::new(ErrorKind::NotFound, "USB function not registered"))
     }
 
-    /// Driver name.
-    pub fn driver(&self) -> Result<OsString> {
-        let dir = self.dir()?;
-        let (driver, _instance) = split_function_dir(&dir)
-            .ok_or_else(|| Error::new(ErrorKind::InvalidData, "invalid function directory name"))?;
-        Ok(driver.to_os_string())
-    }
-
     /// Instance name.
     pub fn instance(&self) -> Result<OsString> {
         let dir = self.dir()?;
@@ -169,13 +161,6 @@ impl FunctionDir {
         let path = self.property_path(name)?;
         log::debug!("creating directories {}", path.display());
         fs::create_dir_all(path)
-    }
-
-    /// Remove a subdirectory.
-    pub fn remove_dir(&self, name: impl AsRef<Path>) -> Result<()> {
-        let path = self.property_path(name)?;
-        log::debug!("removing directory {}", path.display());
-        fs::remove_dir(path)
     }
 
     /// Read a binary property.

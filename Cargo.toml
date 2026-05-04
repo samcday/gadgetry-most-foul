@@ -7,6 +7,7 @@ license = "Apache-2.0"
 repository = "https://github.com/samcday/gadgetry-most-foul"
 authors = ["Sebastian Urban <surban@surban.net>", "gadgetry-most-foul authors"]
 rust-version = "1.88"
+exclude = [".cargo/", ".github/", ".misc/", ".vscode/"]
 version = "0.1.0"
 edition = "2021"
 

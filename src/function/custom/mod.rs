@@ -1668,7 +1668,7 @@ impl EndpointOut {
     /// Read exactly enough bytes from the host to fill `data`.
     ///
     /// If the host sends fewer bytes than `data.len()` (including a ZLP), this
-    /// returns [`ErrorKind::UnexpectedEof`](std::io::ErrorKind::UnexpectedEof)
+    /// returns [`ErrorKind::UnexpectedEof`]
     /// and cancels in-flight chunks. Use a sized framing layer if your protocol
     /// uses short packets as message delimiters.
     pub fn read_exact(&mut self, data: &mut [u8]) -> Result<()> {
@@ -1683,7 +1683,7 @@ impl EndpointOut {
     /// The timeout applies to the whole logical transfer, not to each internal
     /// AIO chunk. If the host sends fewer bytes than `data.len()` (including a
     /// ZLP), this returns
-    /// [`ErrorKind::UnexpectedEof`](std::io::ErrorKind::UnexpectedEof) and
+    /// [`ErrorKind::UnexpectedEof`] and
     /// cancels in-flight chunks.
     pub fn read_exact_timeout(&mut self, data: &mut [u8], timeout: Duration) -> Result<()> {
         let chunk_size = self.chunk_size()?;
@@ -1696,7 +1696,7 @@ impl EndpointOut {
     ///
     /// If the host sends fewer bytes than `data.len()` (including a ZLP), the
     /// future resolves to
-    /// [`ErrorKind::UnexpectedEof`](std::io::ErrorKind::UnexpectedEof) and
+    /// [`ErrorKind::UnexpectedEof`] and
     /// cancels in-flight chunks.
     ///
     /// Dropping this future cancels and reaps all in-flight AIO chunks

@@ -94,7 +94,7 @@ impl Printer {
 
     /// Creates a new USB printer function and handle with f_printer defaults
     #[must_use]
-    pub fn new(self) -> (Printer, Handle) {
+    pub fn new() -> (Printer, Handle) {
         Self::builder().build()
     }
 

@@ -54,17 +54,6 @@ impl Class {
         Self::new(Self::VENDOR_SPECIFIC, sub_class, protocol)
     }
 
-    /// Indicates that class information should be determined from the interface descriptors in the
-    /// device.
-    ///
-    /// Can only be used as device class.
-    ///
-    /// Use [`INTERFACE_SPECIFIC`](Self::INTERFACE_SPECIFIC) instead.
-    #[deprecated(since = "1.1.0", note = "use Class::INTERFACE_SPECIFIC instead")]
-    pub const fn interface_specific() -> Self {
-        Self::new(0, 0, 0)
-    }
-
     // --- Device-level classes ---
 
     /// Class information determined from interface descriptors.

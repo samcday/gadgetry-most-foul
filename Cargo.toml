@@ -6,7 +6,7 @@ keywords = ["usb", "gadget", "peripheral", "configfs", "functionfs"]
 license = "Apache-2.0"
 repository = "https://github.com/samcday/gadgetry-most-foul"
 authors = ["Sebastian Urban <surban@surban.net>", "gadgetry-most-foul authors"]
-rust-version = "1.77"
+rust-version = "1.88"
 version = "0.1.0"
 edition = "2021"
 

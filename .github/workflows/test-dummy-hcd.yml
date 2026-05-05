@@ -52,10 +52,15 @@ jobs:
       - name: Run tests in VM
         run: |
           set -euo pipefail
-          export CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER=".misc/cargo-test-runner.sh"
           export USB_GADGET_NO_THROUGHPUT_CHECK=1
           # The uac1, uac2 and video tests are skipped because dummy_hcd
           # does not support isochronous endpoints.
-          cargo test --release --all-features \
+          .misc/cargo-test-vm.sh --release --all-features \
             -- --nocapture --test-threads=1 --skip uac1 --skip uac2 --skip video
         timeout-minutes: 15
+
+      - name: Run doc tests
+        run: |
+          set -euo pipefail
+          cargo test --release --all-features --doc \
+            -- --nocapture --skip uac1 --skip uac2 --skip video

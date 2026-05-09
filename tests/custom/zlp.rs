@@ -171,8 +171,9 @@ fn zlp_recv_mps_buffer() {
 // ─── Test 2: Receive ZLP with oversized buffer (issue #17) ──────────
 //
 // Host sends MPS bytes of 0xBB followed by a ZLP.
-// Device reads with 2×MPS buffer → ZLP is consumed as transfer terminator;
-// a second read times out. This documents the behavior from issue #17.
+// Device reads with 2×MPS buffer → the positive short completion is progress;
+// the ZLP is consumed as a transfer terminator and the remaining exact read
+// times out.
 
 #[test]
 #[serial]
@@ -197,10 +198,10 @@ fn zlp_recv_large_buffer() {
 
             let mut data = vec![0; buf_size];
             match ep_rx.read_exact_timeout(&mut data, TIMEOUT) {
-                Err(e) if e.kind() == ErrorKind::UnexpectedEof => {
-                    println!("device: short packet rejected as exact-transfer protocol error");
+                Err(e) if e.kind() == ErrorKind::TimedOut => {
+                    println!("device: short packet accepted as progress; remaining exact read timed out");
                 }
-                Ok(()) => panic!("device: expected short exact read to fail"),
+                Ok(()) => panic!("device: expected oversized exact read to time out"),
                 Err(e) => panic!("device: unexpected error: {e}"),
             }
         });

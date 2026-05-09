@@ -411,6 +411,18 @@ impl TransferKind {
             ),
         }
     }
+
+    fn overflow_error(self, expected: usize, actual: usize) -> Error {
+        let op = match self {
+            Self::Read => "read",
+            Self::Write => "write",
+        };
+
+        Error::new(
+            ErrorKind::InvalidData,
+            format!("AIO {op} reported too many bytes: expected at most {expected}, got {actual}"),
+        )
+    }
 }
 
 #[derive(Debug)]
@@ -425,7 +437,6 @@ struct ExactState {
     ptr: *mut u8,
     total_len: usize,
     chunk_size: usize,
-    submitted: usize,
     completed: usize,
     submitted_zero: bool,
     pending: HashMap<usize, PendingChunk>,
@@ -439,7 +450,6 @@ impl ExactState {
             ptr,
             total_len,
             chunk_size: chunk_size.max(1),
-            submitted: 0,
             completed: 0,
             submitted_zero: false,
             pending: HashMap::new(),
@@ -469,14 +479,17 @@ impl ExactState {
             return Ok(());
         }
 
-        while self.submitted < self.total_len && driver.available_slots() > 0 {
-            let remaining = self.total_len - self.submitted;
-            let len = remaining.min(self.chunk_size);
-            let ptr = unsafe { self.ptr.add(self.submitted) };
-            let handle = unsafe { driver.submit_raw(self.kind.opcode(), self.fd, ptr, len)? };
-            self.pending.insert(handle.0, PendingChunk { len });
-            self.submitted += len;
+        // Positive short completions move `completed`, so the next buffer offset
+        // is only known after the current chunk finishes.
+        if !self.pending.is_empty() || self.completed == self.total_len || driver.available_slots() == 0 {
+            return Ok(());
         }
+
+        let remaining = self.total_len - self.completed;
+        let len = remaining.min(self.chunk_size);
+        let ptr = unsafe { self.ptr.add(self.completed) };
+        let handle = unsafe { driver.submit_raw(self.kind.opcode(), self.fd, ptr, len)? };
+        self.pending.insert(handle.0, PendingChunk { len });
 
         Ok(())
     }
@@ -487,9 +500,14 @@ impl ExactState {
             debug_assert_eq!(comp.id, id);
             let chunk = self.pending.remove(&id).expect("completed unknown exact AIO chunk");
             let actual = comp.result()?;
-            if actual != chunk.len {
+
+            if actual > chunk.len {
+                return Err(self.kind.overflow_error(chunk.len, actual));
+            }
+            if actual == 0 && chunk.len != 0 {
                 return Err(self.kind.short_error(chunk.len, actual));
             }
+
             self.completed += actual;
         }
 
@@ -683,3 +701,70 @@ impl Drop for WriteAll<'_> {
 }
 
 unsafe impl Send for WriteAll<'_> {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn driver() -> Driver {
+        Driver::new(1).expect("create AIO driver")
+    }
+
+    fn state(kind: TransferKind, total_len: usize) -> ExactState {
+        ExactState::new(kind, -1, ptr::null_mut(), total_len, total_len.max(1))
+    }
+
+    fn complete(driver: &mut Driver, state: &mut ExactState, id: usize, len: usize, actual: i64) -> Result<()> {
+        state.pending.insert(id, PendingChunk { len });
+        driver.completed.insert(id, CompletedOp { id, res: actual });
+        state.consume_completed(driver)
+    }
+
+    #[test]
+    fn partial_read_completion_advances_without_eof() {
+        let mut driver = driver();
+        let mut state = state(TransferKind::Read, 28);
+
+        complete(&mut driver, &mut state, 0, 28, 14).expect("partial read is progress");
+
+        assert_eq!(state.completed, 14);
+        assert!(state.pending.is_empty());
+        assert!(!state.is_done());
+
+        complete(&mut driver, &mut state, 1, 14, 14).expect("remaining read completes");
+        assert!(state.is_done());
+    }
+
+    #[test]
+    fn partial_write_completion_advances_without_write_zero() {
+        let mut driver = driver();
+        let mut state = state(TransferKind::Write, 28);
+
+        complete(&mut driver, &mut state, 0, 28, 14).expect("partial write is progress");
+
+        assert_eq!(state.completed, 14);
+        assert!(state.pending.is_empty());
+        assert!(!state.is_done());
+
+        complete(&mut driver, &mut state, 1, 14, 14).expect("remaining write completes");
+        assert!(state.is_done());
+    }
+
+    #[test]
+    fn zero_length_read_completion_is_eof() {
+        let mut driver = driver();
+        let mut state = state(TransferKind::Read, 28);
+
+        let err = complete(&mut driver, &mut state, 0, 28, 0).expect_err("zero read is EOF");
+        assert_eq!(err.kind(), ErrorKind::UnexpectedEof);
+    }
+
+    #[test]
+    fn zero_length_write_completion_is_write_zero() {
+        let mut driver = driver();
+        let mut state = state(TransferKind::Write, 28);
+
+        let err = complete(&mut driver, &mut state, 0, 28, 0).expect_err("zero write is WriteZero");
+        assert_eq!(err.kind(), ErrorKind::WriteZero);
+    }
+}

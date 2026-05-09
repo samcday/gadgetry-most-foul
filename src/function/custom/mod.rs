@@ -1587,8 +1587,8 @@ fn exact_aio_chunk_size(max_packet_size: usize) -> usize {
 ///
 /// [`write_all`](Self::write_all) completes only after all bytes from the
 /// caller-provided slice have been transferred to the host. Internally the
-/// transfer may be split into multiple MPS-aligned Linux AIO requests, but no
-/// ownership of the caller's buffer is taken.
+/// transfer may be split across multiple Linux AIO completions, but no ownership
+/// of the caller's buffer is taken.
 #[derive(Debug)]
 pub struct EndpointIn(value::Receiver<EndpointIo>);
 
@@ -1644,8 +1644,8 @@ impl EndpointIn {
 /// USB endpoint from host to device.
 ///
 /// [`read_exact`](Self::read_exact) completes only after the caller-provided
-/// slice has been filled. A short AIO read before the slice is full is treated
-/// as a protocol error, not as an end-of-message delimiter.
+/// slice has been filled. Short positive AIO completions are treated as progress,
+/// not as end-of-message delimiters.
 #[derive(Debug)]
 pub struct EndpointOut(value::Receiver<EndpointIo>);
 
@@ -1667,10 +1667,10 @@ impl EndpointOut {
 
     /// Read exactly enough bytes from the host to fill `data`.
     ///
-    /// If the host sends fewer bytes than `data.len()` (including a ZLP), this
-    /// returns [`ErrorKind::UnexpectedEof`]
-    /// and cancels in-flight chunks. Use a sized framing layer if your protocol
-    /// uses short packets as message delimiters.
+    /// If the host stops making progress before `data` is filled (including by
+    /// sending a ZLP), this returns [`ErrorKind::UnexpectedEof`] and cancels
+    /// in-flight chunks. Use a sized framing layer if your protocol uses short
+    /// packets as message delimiters.
     pub fn read_exact(&mut self, data: &mut [u8]) -> Result<()> {
         let chunk_size = self.chunk_size()?;
         let io = self.0.get()?;
@@ -1681,10 +1681,9 @@ impl EndpointOut {
     /// Read exactly enough bytes from the host to fill `data`, timing out while waiting for completion.
     ///
     /// The timeout applies to the whole logical transfer, not to each internal
-    /// AIO chunk. If the host sends fewer bytes than `data.len()` (including a
-    /// ZLP), this returns
-    /// [`ErrorKind::UnexpectedEof`] and
-    /// cancels in-flight chunks.
+    /// AIO chunk. If the host stops making progress before `data` is filled
+    /// (including by sending a ZLP), this returns [`ErrorKind::UnexpectedEof`]
+    /// and cancels in-flight chunks.
     pub fn read_exact_timeout(&mut self, data: &mut [u8], timeout: Duration) -> Result<()> {
         let chunk_size = self.chunk_size()?;
         let io = self.0.get()?;
@@ -1694,9 +1693,8 @@ impl EndpointOut {
 
     /// Read exactly enough bytes from the host to fill `data` asynchronously.
     ///
-    /// If the host sends fewer bytes than `data.len()` (including a ZLP), the
-    /// future resolves to
-    /// [`ErrorKind::UnexpectedEof`] and
+    /// If the host stops making progress before `data` is filled (including by
+    /// sending a ZLP), the future resolves to [`ErrorKind::UnexpectedEof`] and
     /// cancels in-flight chunks.
     ///
     /// Dropping this future cancels and reaps all in-flight AIO chunks

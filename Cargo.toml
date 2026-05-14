@@ -8,7 +8,7 @@ repository = "https://github.com/samcday/gadgetry-most-foul"
 authors = ["gadgetry-most-foul authors"]
 rust-version = "1.88"
 exclude = [".cargo/", ".github/", ".misc/", ".vscode/"]
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 
 [features]

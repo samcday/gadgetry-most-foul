@@ -263,7 +263,7 @@ impl Driver {
 
         let tv_sec =
             timeout.as_secs().try_into().map_err(|_| Error::new(ErrorKind::InvalidInput, "timeout too large"))?;
-        let tv_nsec = timeout.subsec_nanos().into();
+        let tv_nsec = timeout.subsec_nanos() as libc::c_long;
         let timeout = libc::timespec { tv_sec, tv_nsec };
         let n = self.reap_with_min(1, &timeout)?;
         self.eventfd.drain()?;

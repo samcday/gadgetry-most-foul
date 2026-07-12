@@ -299,6 +299,12 @@ pub struct EndpointDirection {
     direction: Direction,
     /// Queue length.
     pub queue_len: u32,
+    /// Target size of each Linux AIO request, in bytes.
+    ///
+    /// The effective request size is rounded down to a multiple of the
+    /// endpoint's maximum packet size, with a minimum of one packet. A zero
+    /// target is rejected when the endpoint is initialized.
+    pub aio_request_size: usize,
     tx: value::Sender<EndpointIo>,
 }
 
@@ -307,18 +313,25 @@ impl fmt::Debug for EndpointDirection {
         f.debug_struct("EndpointDirection")
             .field("direction", &self.direction)
             .field("queue_len", &self.queue_len)
+            .field("aio_request_size", &self.aio_request_size)
             .finish()
     }
 }
 
 impl EndpointDirection {
     const DEFAULT_QUEUE_LEN: u32 = 16;
+    const DEFAULT_AIO_REQUEST_SIZE: usize = 16 * 1024;
 
     /// From device to host.
     pub fn device_to_host() -> (EndpointIn, EndpointDirection) {
         let (tx, rx) = value::channel();
         let writer = EndpointIn(rx);
-        let this = Self { direction: Direction::DeviceToHost, tx, queue_len: Self::DEFAULT_QUEUE_LEN };
+        let this = Self {
+            direction: Direction::DeviceToHost,
+            queue_len: Self::DEFAULT_QUEUE_LEN,
+            aio_request_size: Self::DEFAULT_AIO_REQUEST_SIZE,
+            tx,
+        };
         (writer, this)
     }
 
@@ -326,7 +339,12 @@ impl EndpointDirection {
     pub fn host_to_device() -> (EndpointOut, EndpointDirection) {
         let (tx, rx) = value::channel();
         let reader = EndpointOut(rx);
-        let this = Self { direction: Direction::HostToDevice, tx, queue_len: Self::DEFAULT_QUEUE_LEN };
+        let this = Self {
+            direction: Direction::HostToDevice,
+            queue_len: Self::DEFAULT_QUEUE_LEN,
+            aio_request_size: Self::DEFAULT_AIO_REQUEST_SIZE,
+            tx,
+        };
         (reader, this)
     }
 
@@ -334,6 +352,17 @@ impl EndpointDirection {
     #[must_use]
     pub fn with_queue_len(mut self, queue_len: u32) -> Self {
         self.queue_len = queue_len;
+        self
+    }
+
+    /// Sets the target size of each Linux AIO request, in bytes.
+    ///
+    /// At transfer time this is rounded down to a multiple of the endpoint's
+    /// maximum packet size. A positive value smaller than one packet selects
+    /// one packet. Zero is rejected when the endpoint is initialized.
+    #[must_use]
+    pub fn with_aio_request_size(mut self, aio_request_size: usize) -> Self {
+        self.aio_request_size = aio_request_size;
         self
     }
 }
@@ -950,7 +979,8 @@ impl CustomFunction {
                     endpoint_num += 1;
 
                     let ep_path = ffs_dir.join(format!("ep{endpoint_num}"));
-                    let (ep_io, ep_file) = EndpointIo::new(ep_path, ep.direction.queue_len)?;
+                    let (ep_io, ep_file) =
+                        EndpointIo::new(ep_path, ep.direction.queue_len, ep.direction.aio_request_size)?;
                     ep.direction.tx.send(ep_io).unwrap();
                     ep_files.push(ep_file);
                 }
@@ -1413,14 +1443,22 @@ struct EndpointIo {
     path: PathBuf,
     file: Weak<File>,
     aio: aio::Driver,
+    aio_request_size: usize,
 }
 
 impl EndpointIo {
-    fn new(path: PathBuf, queue_len: u32) -> Result<(Self, Arc<File>)> {
-        log::debug!("opening endpoint file {} with queue length {queue_len}", path.display());
+    fn new(path: PathBuf, queue_len: u32, aio_request_size: usize) -> Result<(Self, Arc<File>)> {
+        if aio_request_size == 0 {
+            return Err(Error::new(ErrorKind::InvalidInput, "AIO request size must be greater than zero"));
+        }
+
+        log::debug!(
+            "opening endpoint file {} with queue length {queue_len} and target AIO request size {aio_request_size}",
+            path.display()
+        );
         let file = Arc::new(File::options().read(true).write(true).open(&path)?);
         let aio = aio::Driver::new(queue_len)?;
-        Ok((Self { path, file: Arc::downgrade(&file), aio }, file))
+        Ok((Self { path, file: Arc::downgrade(&file), aio, aio_request_size }, file))
     }
 
     fn file(&self) -> Result<Arc<File>> {
@@ -1572,14 +1610,13 @@ impl AsRawFd for EndpointControl {
     }
 }
 
-const TARGET_AIO_CHUNK_SIZE: usize = 16 * 1024;
-
-fn exact_aio_chunk_size(max_packet_size: usize) -> usize {
+fn exact_aio_chunk_size(target_size: usize, max_packet_size: usize) -> usize {
+    debug_assert!(target_size > 0);
     if max_packet_size == 0 {
-        return TARGET_AIO_CHUNK_SIZE;
+        return target_size;
     }
 
-    let packets = (TARGET_AIO_CHUNK_SIZE / max_packet_size).max(1);
+    let packets = (target_size / max_packet_size).max(1);
     packets * max_packet_size
 }
 
@@ -1605,7 +1642,9 @@ impl EndpointIn {
     }
 
     fn chunk_size(&mut self) -> Result<usize> {
-        Ok(exact_aio_chunk_size(self.max_packet_size()?))
+        let max_packet_size = self.max_packet_size()?;
+        let io = self.0.get()?;
+        Ok(exact_aio_chunk_size(io.aio_request_size, max_packet_size))
     }
 
     /// Write exactly all bytes in `data` to the host.
@@ -1662,7 +1701,9 @@ impl EndpointOut {
     }
 
     fn chunk_size(&mut self) -> Result<usize> {
-        Ok(exact_aio_chunk_size(self.max_packet_size()?))
+        let max_packet_size = self.max_packet_size()?;
+        let io = self.0.get()?;
+        Ok(exact_aio_chunk_size(io.aio_request_size, max_packet_size))
     }
 
     /// Read exactly enough bytes from the host to fill `data`.
@@ -1706,5 +1747,56 @@ impl EndpointOut {
         let io = self.0.get()?;
         let file = io.file()?;
         io.aio.read_exact_async(file, data, chunk_size).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{exact_aio_chunk_size, EndpointDirection, EndpointIo};
+    use std::{io::ErrorKind, path::PathBuf};
+
+    #[test]
+    fn aio_request_size_defaults_to_existing_16_kib_target() {
+        let (_, device_to_host) = EndpointDirection::device_to_host();
+        let (_, host_to_device) = EndpointDirection::host_to_device();
+
+        assert_eq!(device_to_host.aio_request_size, 16 * 1024);
+        assert_eq!(host_to_device.aio_request_size, 16 * 1024);
+    }
+
+    #[test]
+    fn aio_request_size_is_configurable_per_direction() {
+        let (_, direction) = EndpointDirection::device_to_host();
+        let direction = direction.with_aio_request_size(64 * 1024);
+
+        assert_eq!(direction.aio_request_size, 64 * 1024);
+        assert_eq!(exact_aio_chunk_size(direction.aio_request_size, 512), 64 * 1024);
+        assert_eq!(exact_aio_chunk_size(direction.aio_request_size, 1024), 64 * 1024);
+    }
+
+    #[test]
+    fn aio_request_size_is_aligned_down_to_max_packet_size() {
+        assert_eq!(exact_aio_chunk_size(16 * 1024, 64), 16 * 1024);
+        assert_eq!(exact_aio_chunk_size(16 * 1024, 512), 16 * 1024);
+        assert_eq!(exact_aio_chunk_size(16 * 1024, 1024), 16 * 1024);
+        assert_eq!(exact_aio_chunk_size(65_000, 1024), 63 * 1024);
+    }
+
+    #[test]
+    fn aio_request_size_is_at_least_one_packet() {
+        assert_eq!(exact_aio_chunk_size(1023, 1024), 1024);
+    }
+
+    #[test]
+    fn zero_max_packet_size_uses_the_target() {
+        assert_eq!(exact_aio_chunk_size(16 * 1024, 0), 16 * 1024);
+    }
+
+    #[test]
+    fn zero_aio_request_size_is_rejected_at_endpoint_initialization() {
+        let err = EndpointIo::new(PathBuf::from("unused-for-zero-request-size"), 1, 0).unwrap_err();
+
+        assert_eq!(err.kind(), ErrorKind::InvalidInput);
+        assert_eq!(err.to_string(), "AIO request size must be greater than zero");
     }
 }

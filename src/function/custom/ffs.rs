@@ -66,6 +66,10 @@ pub const DIR_IN: u8 = 0x80;
 /// `EL2HLT` errno returned by FunctionFS when stalling endpoint 0.
 pub const EL2HLT: i32 = 51;
 
+/// `EIDRM` errno returned by FunctionFS on endpoint 0 when the SETUP request being answered was
+/// cancelled by a newer event (another SETUP, or a disable, unbind, suspend or resume).
+pub const EIDRM: i32 = libc::EIDRM;
+
 bitflags! {
     #[derive(Clone, Copy, Debug)]
     pub struct Flags: u32 {

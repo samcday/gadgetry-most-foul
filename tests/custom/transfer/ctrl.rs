@@ -10,7 +10,7 @@ use nusb::{
 use std::{
     sync::{
         atomic::{AtomicBool, Ordering},
-        Arc,
+        Arc, Mutex,
     },
     thread,
     time::Duration,
@@ -37,6 +37,10 @@ mod ctrl_req {
     pub const DROP_RECV: u8 = 5;
     /// Host requests data, device drops the CtrlSender without calling send or halt.
     pub const DROP_SEND: u8 = 6;
+    /// Host requests data and gives up; device answers only after a newer request cancelled it.
+    pub const LATE_SEND: u8 = 7;
+    /// Host sends data and gives up; device reads it only after a newer request cancelled it.
+    pub const LATE_RECV: u8 = 8;
     /// Stop the device event loop.
     pub const STOP: u8 = 255;
 }
@@ -112,6 +116,66 @@ fn run_device_ctrl_events(custom: &mut Custom, stop: &AtomicBool) {
                 }
                 break;
             }
+        }
+    }
+}
+
+/// How long the device sits on a `LATE_*` request before answering it.
+///
+/// This must comfortably exceed [`LATE_HOST_TIMEOUT`] plus the time the host needs to issue its
+/// next request, so that the next SETUP reaches FunctionFS while the late one is still pending.
+const LATE_DEVICE_DELAY: Duration = Duration::from_millis(500);
+
+/// How long the host waits for a `LATE_*` request before cancelling it.
+const LATE_HOST_TIMEOUT: Duration = Duration::from_millis(50);
+
+/// Device event loop for the cancelled-SETUP test.
+///
+/// It polls with [`Custom::try_event`] like an async caller would, so every event goes through
+/// the stale-SETUP cleanup that runs before the next event is read. The result of each late
+/// answer is appended to `late`.
+fn run_device_late_ctrl_events(
+    custom: &mut Custom, stop: &AtomicBool, late: &Mutex<Vec<std::io::Result<usize>>>,
+) {
+    let mut ctrl_data = Vec::new();
+    while !stop.load(Ordering::Relaxed) {
+        let event = match custom.try_event() {
+            Ok(Some(event)) => event,
+            Ok(None) => {
+                thread::sleep(Duration::from_millis(5));
+                continue;
+            }
+            Err(e) => panic!("device event error: {e}"),
+        };
+        match event {
+            Event::SetupHostToDevice(req) => match req.ctrl_req().request {
+                ctrl_req::STOP => {
+                    stop.store(true, Ordering::Relaxed);
+                    req.recv_all().unwrap();
+                }
+                ctrl_req::ECHO => ctrl_data = req.recv_all().unwrap(),
+                ctrl_req::LATE_RECV => {
+                    thread::sleep(LATE_DEVICE_DELAY);
+                    let mut buf = vec![0u8; req.len()];
+                    late.lock().unwrap().push(req.recv(&mut buf));
+                }
+                _ => {
+                    let _ = req.recv_all();
+                }
+            },
+            Event::SetupDeviceToHost(req) => match req.ctrl_req().request {
+                ctrl_req::ECHO => {
+                    req.send(&ctrl_data).unwrap();
+                }
+                ctrl_req::LATE_SEND => {
+                    thread::sleep(LATE_DEVICE_DELAY);
+                    late.lock().unwrap().push(req.send(&[0x5a; 16]));
+                }
+                _ => {
+                    let _ = req.send(&[]);
+                }
+            },
+            _ => {}
         }
     }
 }
@@ -526,6 +590,102 @@ fn ctrl_drop_recovery_stress() {
             host_stop(&_intf, if_num);
         });
     });
+
+    thread::sleep(Duration::from_millis(500));
+    reg.remove().unwrap();
+}
+
+/// A request the kernel cancelled before the device answered it must not wedge ep0.
+///
+/// The host gives up on a request and sends a new one while the device still holds the first.
+/// FunctionFS then cancels the first request, and the device's late `send()` or `recv()` fails
+/// with `EIDRM`. Earlier versions kept the cancelled request marked as pending, so the next
+/// [`Custom::try_event`] tried to stall it, got `EINVAL` from FunctionFS and returned an error
+/// instead of the next event. The same cancellation happens when the gadget is disconnected or
+/// its UDC is unbound while a request is being answered.
+#[test]
+#[serial]
+fn ctrl_cancelled_setup() {
+    init();
+
+    if skip_host() {
+        return;
+    }
+
+    let (reg, mut custom, _ep_rx, _ep_tx) =
+        setup_gadget_with_id(VID, PID, "ctrl cancelled setup test", "ctrl-cancelled-001");
+
+    let stop = Arc::new(AtomicBool::new(false));
+    let stop_dev = stop.clone();
+    let late = Mutex::new(Vec::new());
+
+    thread::scope(|s| {
+        let late = &late;
+        s.spawn(move || run_device_late_ctrl_events(&mut custom, &stop_dev, late));
+
+        s.spawn(|| {
+            let (intf, _ep_in, _ep_out, if_num) = open_host_device(VID, PID);
+
+            for (round, late_req) in
+                [ctrl_req::LATE_SEND, ctrl_req::LATE_RECV, ctrl_req::LATE_SEND].into_iter().enumerate()
+            {
+                // Give up on the request while the device is still sitting on it.
+                let result = if late_req == ctrl_req::LATE_SEND {
+                    intf.control_in(
+                        ControlIn {
+                            control_type: ControlType::Vendor,
+                            recipient: Recipient::Interface,
+                            request: late_req,
+                            value: 0,
+                            index: if_num.into(),
+                            length: 16,
+                        },
+                        LATE_HOST_TIMEOUT,
+                    )
+                    .wait()
+                    .map(|_| ())
+                } else {
+                    intf.control_out(
+                        ControlOut {
+                            control_type: ControlType::Vendor,
+                            recipient: Recipient::Interface,
+                            request: late_req,
+                            value: 0,
+                            index: if_num.into(),
+                            data: &[0xa5; 16],
+                        },
+                        LATE_HOST_TIMEOUT,
+                    )
+                    .wait()
+                };
+                assert!(
+                    result.is_err(),
+                    "round {round}: request {late_req} completed although the device held it"
+                );
+
+                // The next request cancels the late one in FunctionFS. It is served only after the
+                // device has tried to answer the cancelled request and read its next event.
+                let echo_data: Vec<u8> = (0..16u8).map(|b| b ^ round as u8).collect();
+                host_control_out(&intf, if_num, ctrl_req::ECHO, &echo_data)
+                    .unwrap_or_else(|e| panic!("round {round}: echo out after cancelled request failed: {e}"));
+                let reply = host_control_in(&intf, if_num, ctrl_req::ECHO, echo_data.len() as u16)
+                    .unwrap_or_else(|e| panic!("round {round}: echo in after cancelled request failed: {e}"));
+                assert_eq!(reply, echo_data, "round {round}: echo mismatch after cancelled request");
+                println!("host: round {round}: ep0 still served requests after cancelling request {late_req}");
+            }
+
+            host_stop(&intf, if_num);
+        });
+    });
+
+    let late = late.into_inner().unwrap();
+    assert_eq!(late.len(), 3, "device did not answer every late request");
+    for (round, result) in late.iter().enumerate() {
+        match result {
+            Err(e) if e.raw_os_error() == Some(libc::EIDRM) => {}
+            other => panic!("round {round}: late answer expected EIDRM, got {other:?}"),
+        }
+    }
 
     thread::sleep(Duration::from_millis(500));
     reg.remove().unwrap();

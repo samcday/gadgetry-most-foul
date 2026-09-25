@@ -1107,21 +1107,10 @@ impl Custom {
 
     /// Clear previous event if it was forgotten.
     fn clear_prev_event(&mut self) -> Result<()> {
-        let mut ep0 = self.ep0()?;
+        let ep0 = self.ep0()?;
 
-        let mut buf = [0; 1];
-        match self.setup_event.take() {
-            Some(Direction::DeviceToHost) => match ep0.read(&mut buf) {
-                Ok(_) => {}
-                Err(e) if e.raw_os_error() == Some(ffs::EL2HLT) => {}
-                Err(e) => return Err(e),
-            },
-            Some(Direction::HostToDevice) => match ep0.write(&buf) {
-                Ok(_) => {}
-                Err(e) if e.raw_os_error() == Some(ffs::EL2HLT) => {}
-                Err(e) => return Err(e),
-            },
-            None => (),
+        if let Some(direction) = self.setup_event.take() {
+            stall_setup(&ep0, direction)?;
         }
 
         Ok(())
@@ -1203,6 +1192,43 @@ impl Custom {
 impl Drop for Custom {
     fn drop(&mut self) {
         self.ep_files.lock().unwrap().clear();
+    }
+}
+
+/// Whether an ep0 error means FunctionFS cancelled the pending SETUP request.
+///
+/// The kernel cancels a SETUP that user space has read but not yet answered when any newer event
+/// arrives: another SETUP from the host, or a disable, unbind, suspend or resume, for example on
+/// a disconnect or a UDC unbind. The next read or write on ep0 then fails with `EIDRM`, and the
+/// kernel forgets the request, so there is nothing left to answer or stall.
+fn is_setup_cancelled(err: &Error) -> bool {
+    err.raw_os_error() == Some(ffs::EIDRM)
+}
+
+/// Stalls a SETUP request that user space read but did not answer.
+///
+/// FunctionFS stalls when user space reads ep0 while a device-to-host SETUP is pending, or writes
+/// it while a host-to-device SETUP is pending, and reports the stall as `EL2HLT`.
+///
+/// The request may also be gone already, which leaves nothing to stall:
+///
+/// * `EIDRM`: the kernel cancelled it (see [`is_setup_cancelled`]).
+/// * `EINVAL` from the 1-byte read, or `ESRCH` from the write: no SETUP is pending any more, for
+///   example because an earlier reply was queued and then failed on a disconnect.
+fn stall_setup(ep0: &File, direction: Direction) -> Result<()> {
+    let mut ep0 = ep0;
+    let mut buf = [0; 1];
+    let (res, no_setup_errno) = match direction {
+        Direction::DeviceToHost => (ep0.read(&mut buf), libc::EINVAL),
+        Direction::HostToDevice => (ep0.write(&buf), libc::ESRCH),
+    };
+
+    match res {
+        Ok(_) => Ok(()),
+        Err(e) if e.raw_os_error() == Some(ffs::EL2HLT) => Ok(()), // expected from FunctionFS
+        Err(e) if is_setup_cancelled(&e) => Ok(()),
+        Err(e) if e.raw_os_error() == Some(no_setup_errno) => Ok(()),
+        Err(e) => Err(e),
     }
 }
 
@@ -1290,30 +1316,39 @@ impl CtrlSender<'_> {
     /// Send the response to the USB host.
     ///
     /// Returns the number of bytes sent.
+    ///
+    /// Fails with `EIDRM` if the kernel cancelled the request before the response was sent,
+    /// because a newer event (for example a disconnect or another request) arrived first. The
+    /// request is finished in that case and the endpoint is not stalled.
     #[must_use = "the number of bytes sent may be less than the data length"]
     pub fn send(self, data: &[u8]) -> Result<usize> {
         let mut file = self.custom.ep0()?;
 
-        let n = file.write(data)?;
+        let n = match file.write(data) {
+            Ok(n) => n,
+            Err(e) => {
+                if is_setup_cancelled(&e) {
+                    self.custom.setup_event = None;
+                }
+                return Err(e);
+            }
+        };
 
         self.custom.setup_event = None;
         Ok(n)
     }
 
     /// Stall the endpoint.
+    ///
+    /// Succeeds without stalling when the kernel has already cancelled the request.
     pub fn halt(mut self) -> Result<()> {
         self.do_halt()
     }
 
     fn do_halt(&mut self) -> Result<()> {
-        let mut file = self.custom.ep0()?;
+        let file = self.custom.ep0()?;
 
-        let mut buf = [0; 1];
-        match file.read(&mut buf) {
-            Ok(_) => {}
-            Err(e) if e.raw_os_error() == Some(ffs::EL2HLT) => {} // expected from FunctionFS
-            Err(e) => return Err(e),
-        }
+        stall_setup(&file, Direction::DeviceToHost)?;
 
         self.custom.setup_event = None;
         Ok(())
@@ -1370,30 +1405,39 @@ impl CtrlReceiver<'_> {
     /// Receive the data from the USB host into the provided buffer.
     ///
     /// Returns the amount of data received.
+    ///
+    /// Fails with `EIDRM` if the kernel cancelled the request before its data was received,
+    /// because a newer event (for example a disconnect or another request) arrived first. The
+    /// request is finished in that case and the endpoint is not stalled.
     #[must_use = "the amount of data received may be less than the buffer size"]
     pub fn recv(self, data: &mut [u8]) -> Result<usize> {
         let mut file = self.custom.ep0()?;
 
-        let n = file.read(data)?;
+        let n = match file.read(data) {
+            Ok(n) => n,
+            Err(e) => {
+                if is_setup_cancelled(&e) {
+                    self.custom.setup_event = None;
+                }
+                return Err(e);
+            }
+        };
 
         self.custom.setup_event = None;
         Ok(n)
     }
 
     /// Stall the endpoint.
+    ///
+    /// Succeeds without stalling when the kernel has already cancelled the request.
     pub fn halt(mut self) -> Result<()> {
         self.do_halt()
     }
 
     fn do_halt(&mut self) -> Result<()> {
-        let mut file = self.custom.ep0()?;
+        let file = self.custom.ep0()?;
 
-        let buf = [0; 1];
-        match file.write(&buf) {
-            Ok(_) => {}
-            Err(e) if e.raw_os_error() == Some(ffs::EL2HLT) => {} // expected from FunctionFS
-            Err(e) => return Err(e),
-        }
+        stall_setup(&file, Direction::HostToDevice)?;
 
         self.custom.setup_event = None;
         Ok(())
